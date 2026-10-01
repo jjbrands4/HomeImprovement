@@ -78,7 +78,7 @@ USE_TARGET_RULE = False       # True = ALSO treat "15% below your Target Price" 
 REQUIRE_AT_OR_BELOW_TARGET = False   # True = never report a "deal" priced above your Target Price
 
 # ---- Noise / sanity filters -------------------------------------------------
-MIN_PRICE_RATIO_OF_TARGET = 0.25   # listings priced under 25% of target are almost surely accessories
+MIN_PRICE_RATIO_OF_TARGET = 0.35   # listings priced under 35% of target are almost surely accessories
 OUTLIER_LOW, OUTLIER_HIGH = 0.4, 2.5   # prices outside 0.4x..2.5x the pool median are excluded from averages
 MAX_DEALS_PER_ITEM = 5             # cap Deals Data rows per item per run
 
