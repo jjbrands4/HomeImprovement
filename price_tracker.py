@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import base64
 import difflib
+import gzip
 import json
 import os
 import re
@@ -55,6 +56,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from html import unescape as html_unescape
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
@@ -78,7 +80,7 @@ USE_TARGET_RULE = False       # True = ALSO treat "15% below your Target Price" 
 REQUIRE_AT_OR_BELOW_TARGET = False   # True = never report a "deal" priced above your Target Price
 
 # ---- Noise / sanity filters -------------------------------------------------
-MIN_PRICE_RATIO_OF_TARGET = 0.35   # listings priced under 35% of target are almost surely accessories
+MIN_PRICE_RATIO_OF_TARGET = 0.25   # listings priced under 25% of target are almost surely accessories
 OUTLIER_LOW, OUTLIER_HIGH = 0.4, 2.5   # prices outside 0.4x..2.5x the pool median are excluded from averages
 MAX_DEALS_PER_ITEM = 5             # cap Deals Data rows per item per run
 
@@ -107,6 +109,11 @@ EBAY_MIN_FEEDBACK_COUNT = 10
 # eBay condition IDs: New, New other, Cert/Excellent/Very good/Good refurbished, Seller refurb, Like new, Used, Very good
 EBAY_CONDITION_IDS = "1000|1500|2000|2010|2020|2030|2500|2750|3000|4000"
 
+# Direct-site discovery (used only for isDirectToConsumer vendors whose name matches the product)
+SITEMAP_MAX_FILES = 6          # max sitemap files fetched per domain per run (product sitemaps are tried first)
+DIRECT_MAX_PAGES = 2           # max product pages fetched per vendor per item
+SHOPIFY_MAX_PRODUCTS = 3       # max matching Shopify products whose variants (1/2/4-pack...) are read
+
 # Domains for direct-to-consumer vendors (only used when isDirectToConsumer = 1).
 # You can override/add by putting a "Domain" column in the Primary Vendor List tab.
 KNOWN_DOMAINS = {
@@ -129,7 +136,8 @@ RUN_COLS = ["RowDateTime", "runID", "WishlistItem", "Product", "Listings Searche
             "Primary Vendor Price or Better", "Deals found", "Primary Vendor Deals",
             # --- added by this script (needed for the 30-day trend) ---
             "Avg Price (New)", "Avg Price (Resale)", "30d Trend (New)", "30d Trend (Resale)",
-            "Lowest Price Found", "Source Notes"]
+            "Lowest Price Found", "Source Notes", "Matching Listings",
+            "Avg Sample (New)", "Avg Sample (Resale)"]   # how many listings each average is based on
 DEALS_COLS = ["runID", "WishlistItem", "Product", "URL", "isPrimaryVendor", "Target Price",
               "Price", "RightProductConfidence",
               # --- added by this script ---
@@ -296,6 +304,7 @@ def classify_confidence(item: "Item", title: str, anchor_head: Optional[str] = N
       * Listing mirrors a SKU-verified listing (similarity >= 0.8) and specs match -> High.
       * Name is a strong-but-not-exact match (>=75% of words or >=0.85 similarity) -> Medium.
       * Otherwise Low.
+    A model/version word from your product name ('Gen3', 'E2') missing from the title is always Low.
     Pack phrases ('2 Pack') are removed before comparing.
     Hard Lows: accessories ('case', 'mount'), a different 'GenN', a different colour/model
     code variant of the SKU, or a missing name word plus a variant word (e.g. 'Pro', 'Ambiance').
@@ -336,6 +345,13 @@ def classify_confidence(item: "Item", title: str, anchor_head: Optional[str] = N
 
     if coverage < 1.0 and ((head_set & VARIANT_WORDS) - set(name_tokens)):
         return "Low", "variant word present and name word missing"
+    # Model/version words in YOUR product name (letters+digits, e.g. 'gen3', 'e2', 'zp1') must appear in the
+    # listing, otherwise 'ThirdReality Smart Plug E2' would pass for 'Smart Plug Gen3'. Exact SKU overrides.
+    sku_in_title = any(sku.lower().replace("-", "") in t_compact for sku in item.skus)
+    missing_model = [t for t in name_tokens if re.search(r"[a-z]", t) and re.search(r"\d", t)
+                     and t not in t_set and t not in t_compact]
+    if missing_model and not sku_in_title:
+        return "Low", f"model '{missing_model[0]}' not in title"
 
     # ---- spec check (whole title, not just head) ----------------------------
     specs_ok = True
@@ -424,6 +440,7 @@ class Item:
     bulk_sizes: set
     skus: list = field(default_factory=list)            # model-number-like keywords
     spec_phrases: list = field(default_factory=list)    # specs + non-SKU keywords (must appear in title)
+    urls: list = field(default_factory=list)            # optional "Product URLs" column: exact pages to price-check
 
 
 @dataclass
@@ -466,7 +483,8 @@ def load_items(ws) -> list:
         "wid": ("WishlistItem",), "product": ("Product",), "specs": ("Product specifications",),
         "kw": ("Search Keywords",), "loc": ("Location",), "pri": ("Priority",),
         "qty": ("Quantity Needed",), "used": ("Open to used",), "target": ("Target Price",),
-        "bulk": ("Is Bulk Option",), "bkw": ("Bulk Keywords",)}.items()}
+        "bulk": ("Is Bulk Option",), "bkw": ("Bulk Keywords",),
+        "urls": ("Product URLs", "Product URL", "Product Links", "Links")}.items()}
 
     def get(r, k):
         return ws.cell(r, c[k]).value if c.get(k) else None
@@ -489,7 +507,8 @@ def load_items(ws) -> list:
             location=str(get(r, "loc") or "").strip(), priority=pri, qty=get(r, "qty"),
             open_used=truthy(get(r, "used")), target=parse_price(get(r, "target")),
             bulk=truthy(get(r, "bulk")), bulk_sizes=parse_bulk_sizes(get(r, "bkw")),
-            skus=skus, spec_phrases=specs + spec_kw))
+            skus=skus, spec_phrases=specs + spec_kw,
+            urls=[u for u in split_multi(get(r, "urls")) if u.lower().startswith("http")]))
     return items
 
 
@@ -529,6 +548,7 @@ def load_history(ws) -> list:
     hm = header_map(ws)
     c_dt, c_w = find_col(hm, "RowDateTime"), find_col(hm, "WishlistItem")
     c_n, c_r = find_col(hm, "Avg Price (New)"), find_col(hm, "Avg Price (Resale)")
+    c_sn, c_sr = find_col(hm, "Avg Sample (New)"), find_col(hm, "Avg Sample (Resale)")
     out = []
     for r in range(2, ws.max_row + 1):
         dt = _to_dt(ws.cell(r, c_dt).value) if c_dt else None
@@ -536,16 +556,20 @@ def load_history(ws) -> list:
             continue
         out.append({"wid": str(ws.cell(r, c_w).value).strip() if c_w else "", "dt": dt,
                     "avg_new": parse_price(ws.cell(r, c_n).value) if c_n else None,
-                    "avg_res": parse_price(ws.cell(r, c_r).value) if c_r else None})
+                    "avg_res": parse_price(ws.cell(r, c_r).value) if c_r else None,
+                    "n_new": parse_price(ws.cell(r, c_sn).value) if c_sn else None,
+                    "n_res": parse_price(ws.cell(r, c_sr).value) if c_sr else None})
     return out
 
 
 def trend_for(history: list, wid, pool: str, now: datetime) -> Optional[float]:
-    """Mean of this item's stored per-run averages over the last TREND_WINDOW_DAYS (needs >= 3 points)."""
+    """Mean of this item's stored per-run averages over the last TREND_WINDOW_DAYS (needs >= 3 points).
+    Runs whose average came from fewer than MARKET_MIN_SAMPLE listings are left out of the trend."""
     cutoff = now - timedelta(days=TREND_WINDOW_DAYS)
-    key = "avg_new" if pool == "new" else "avg_res"
+    key, nkey = ("avg_new", "n_new") if pool == "new" else ("avg_res", "n_res")
     vals = [h[key] for h in history
-            if h["wid"] == str(wid).strip() and h["dt"] >= cutoff and h[key]]
+            if h["wid"] == str(wid).strip() and h["dt"] >= cutoff and h[key]
+            and (h.get(nkey) is None or h[nkey] >= MARKET_MIN_SAMPLE)]
     return round(statistics.mean(vals), 2) if len(vals) >= TREND_MIN_POINTS else None
 
 
@@ -783,61 +807,273 @@ def parse_jsonld_product(html: str) -> Optional[dict]:
     return None
 
 
-def direct_vendor_listings(vendor: Vendor, query: str, session: requests.Session) -> tuple:
-    """
-    Look up a product on one direct-to-consumer site. Returns (listings, note).
-      1) Shopify stores expose a free JSON search (/search/suggest.json).
-      2) Otherwise: DuckDuckGo HTML 'site:' search, then read the product page's JSON-LD.
-    Anything that fails or is blocked returns ([], 'N/A ...') - never raises.
-    """
-    if not vendor.domain:
-        return [], f"Direct[{vendor.name}]: N/A (no domain known; add a 'Domain' column to the vendor tab)"
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
-    base = f"https://{vendor.domain}"
-    # ---- 1) Shopify predictive search ---------------------------------------
+BROWSER_HEADERS = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9",
+                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+_SITEMAP_CACHE: dict = {}          # domain -> list of URLs (shared by all items in one run)
+_BLOCKED_STATUSES = {202, 401, 403, 429, 503}
+_NON_PRODUCT_PATHS = ("/search", "/blog", "/support", "/help", "/compare", "/collections", "/category",
+                      "/categories", "/stories", "/press", "/news", "/account", "/cart", "/login")
+
+
+def _get(session, url, **kw):
+    """GET that never raises (returns None on network errors)."""
     try:
-        r = session.get(f"{base}/search/suggest.json", headers=headers, timeout=HTTP_TIMEOUT, params={
-            "q": query, "resources[type]": "product", "resources[limit]": 8})
-        if r.ok and "json" in r.headers.get("content-type", ""):
-            prods = (r.json().get("resources", {}).get("results", {}) or {}).get("products", [])
-            out = []
-            for p in prods:
-                price = parse_price(p.get("price"))
-                if not price:
-                    continue
+        return session.get(url, headers=BROWSER_HEADERS, timeout=HTTP_TIMEOUT, **kw)
+    except Exception:
+        return None
+
+
+def _us_locale_ok(url: str) -> bool:
+    """Skip other-country pages (/en-gb/, /de-de/ ...) so prices are in USD for the US store."""
+    for seg in urlparse(url).path.lower().split("/"):
+        if re.fullmatch(r"[a-z]{2}[-_][a-z]{2}", seg) and seg.replace("_", "-") != "en-us":
+            return False
+    return True
+
+
+def rank_product_urls(urls: list, item: Item, vendor: Vendor, limit: int = DIRECT_MAX_PAGES) -> list:
+    """Pick the URLs whose path best matches the product name (brand words already implied by the
+    domain are ignored, e.g. 'sonos' on sonos.com). '/en-us/shop/ray' scores well for 'Sonos Ray Soundbar'."""
+    brand = set(re.split(r"[^a-z0-9]+", (vendor.domain + " " + vendor.name).lower()))
+    name_tokens = [t for t in norm_text(item.product).split() if t not in brand] or norm_text(item.product).split()
+    skus = [k.lower().replace("-", "") for k in item.skus]
+    scored = []
+    for u in dict.fromkeys(urls):                                   # de-duplicate, keep order
+        path = unquote(urlparse(u).path).lower()
+        if not _us_locale_ok(u) or path in ("", "/") or any(x in path for x in _NON_PRODUCT_PATHS):
+            continue
+        toks = set(norm_text(path).split())
+        comp = norm_text(path).replace(" ", "")
+        if (toks & ACCESSORY_WORDS) - set(name_tokens):
+            continue                                                # '/ray-wall-mount' is an accessory
+        cov = sum(1 for t in name_tokens if t in toks or (len(t) >= 4 and t in comp)) / len(name_tokens)
+        sku_hit = any(k and k in comp for k in skus)
+        if cov >= 0.5 or sku_hit:
+            scored.append((cov + (1 if sku_hit else 0), -len(path), u))
+    scored.sort(reverse=True)
+    return [u for _, _, u in scored[:limit]]
+
+
+def sitemap_links(domain: str, session) -> list:
+    """All page URLs from the site's sitemaps (robots.txt -> sitemap index -> product sitemaps first).
+    Sitemaps are published for search engines, so they are rarely bot-blocked. Cached per run."""
+    if domain in _SITEMAP_CACHE:
+        return _SITEMAP_CACHE[domain]
+    urls, fetched = [], 0
+    r = _get(session, f"https://{domain}/robots.txt")
+    queue = re.findall(r"(?im)^\s*sitemap:\s*(\S+)", r.text) if (r is not None and r.ok) else []
+    queue = queue or [f"https://{domain}/sitemap.xml"]
+    while queue and fetched < SITEMAP_MAX_FILES:
+        sm = queue.pop(0)
+        fetched += 1
+        r = _get(session, sm)
+        if r is None or not r.ok:
+            continue
+        body = r.content
+        if sm.endswith(".gz") or body[:2] == b"\x1f\x8b":
+            try:
+                body = gzip.decompress(body)
+            except OSError:
+                continue
+        text = body.decode("utf-8", "ignore")
+        locs = [html_unescape(x) for x in re.findall(r"<loc>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)", text)]
+        if "<sitemapindex" in text:
+            kids = [k for k in locs if _us_locale_ok(k)]
+            kids.sort(key=lambda k: ("product" not in k.lower(), not re.search(r"en[-_]?us|/us/", k.lower())))
+            queue = kids + queue
+        else:
+            urls.extend(locs)
+    _SITEMAP_CACHE[domain] = urls
+    return urls
+
+
+def _extract_result_links(page_html: str, domain: str) -> list:
+    """Pull result URLs for `domain` out of a search-results page (handles DuckDuckGo and Bing redirect links)."""
+    bare, out = domain.replace("www.", ""), []
+    for raw in re.findall(r"""href=["']([^"']+)["']""", page_html or ""):
+        u = html_unescape(raw)
+        m = re.search(r"uddg=([^&]+)", u)
+        if m:
+            u = unquote(m.group(1))
+        elif "bing.com/ck/a" in u:
+            m = re.search(r"[?&]u=a1([^&]+)", u)
+            if not m:
+                continue
+            b64 = m.group(1) + "=" * (-len(m.group(1)) % 4)
+            try:
+                u = base64.urlsafe_b64decode(b64).decode("utf-8", "ignore")
+            except ValueError:
+                continue
+        if u.startswith("//"):
+            u = "https:" + u
+        if urlparse(u).netloc.lower().replace("www.", "").endswith(bare) and u not in out:
+            out.append(u)
+    return out
+
+
+SEARCH_ENGINES = [   # tried in order; each is free and key-less but may rate-limit automated traffic
+    ("DuckDuckGo", "post", "https://html.duckduckgo.com/html/", lambda q: {"data": {"q": q}}),
+    ("DuckDuckGo Lite", "post", "https://lite.duckduckgo.com/lite/", lambda q: {"data": {"q": q}}),
+    ("Bing", "get", "https://www.bing.com/search", lambda q: {"params": {"q": q, "setlang": "en-US", "cc": "US"}}),
+]
+
+
+def search_engine_links(domain: str, query: str, session) -> tuple:
+    """Last-resort 'site:' search across several engines. Returns (links, note)."""
+    statuses = []
+    for name, method, url, kw in SEARCH_ENGINES:
+        try:
+            fn = session.post if method == "post" else session.get
+            r = fn(url, headers=BROWSER_HEADERS, timeout=HTTP_TIMEOUT, **kw(f"site:{domain} {query}"))
+        except Exception as e:
+            statuses.append(f"{name} {type(e).__name__}")
+            continue
+        links = _extract_result_links(r.text, domain) if r.status_code == 200 else []
+        if links:
+            return links, f"search ({name})"
+        statuses.append(f"{name} blocked (HTTP {r.status_code})" if r.status_code in _BLOCKED_STATUSES
+                        else f"{name} no results")
+        time.sleep(1)
+    return [], "search engines: " + ", ".join(statuses)
+
+
+def parse_meta_price(page_html: str) -> Optional[dict]:
+    """Fallback when a page has no JSON-LD: Open Graph / product meta tags."""
+    m = re.search(r"""<meta[^>]+(?:property|name)=["'](?:product:price:amount|og:price:amount)["'][^>]+content=["']([^"']+)""",
+                  page_html or "", re.I)
+    if not m:
+        return None
+    a = re.search(r"""<meta[^>]+(?:property|name)=["'](?:product:availability|og:availability)["'][^>]+content=["']([^"']+)""",
+                  page_html, re.I)
+    t = re.search(r"""<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)""", page_html, re.I)
+    avail = (a.group(1) if a else "").lower().replace(" ", "").replace("_", "")
+    stock = None if not avail else False if "out" in avail else True if "instock" in avail else None
+    return {"name": html_unescape(t.group(1)) if t else "", "price": parse_price(m.group(1)), "in_stock": stock}
+
+
+def shopify_variant_listings(base: str, handle: str, title: str, vendor_name: str, session) -> list:
+    """Every purchasable variant of a Shopify product (e.g. '1 Pack', '2 Pack', '4 Pack') with its own
+    price and stock flag. Shopify's /products/<handle>.js returns prices in CENTS."""
+    r = _get(session, f"{base}/products/{handle}.js")
+    if r is None or not r.ok:
+        return []
+    try:
+        variants = r.json().get("variants") or []
+    except ValueError:
+        return []
+    out = []
+    for v in variants:
+        cents = v.get("price")
+        price = cents / 100 if isinstance(cents, (int, float)) else parse_price(cents)
+        if not price:
+            continue
+        vt = str(v.get("title") or "").strip()
+        full = title if vt.lower() in ("", "default title") else f"{title} - {vt}"
+        url = f"{base}/products/{handle}" + (f"?variant={v['id']}" if v.get("id") and len(variants) > 1 else "")
+        out.append(Listing(title=full, url=url, price=price, vendor=vendor_name, source="direct",
+                           in_stock=v["available"] if isinstance(v.get("available"), bool) else None))
+    return out
+
+
+def shopify_listings(vendor: Vendor, item: Item, session) -> Optional[tuple]:
+    """Shopify stores: site search -> keep only results that actually match the product -> read each
+    match's variants (pack sizes). Returns None when the site is not a Shopify store."""
+    base = f"https://{vendor.domain}"
+    r = _get(session, f"{base}/search/suggest.json", params={
+        "q": build_query(item, include_specs=False), "resources[type]": "product", "resources[limit]": 10})
+    if r is None or not r.ok or "json" not in r.headers.get("content-type", ""):
+        return None
+    try:
+        prods = (r.json().get("resources", {}).get("results", {}) or {}).get("products", []) or []
+    except ValueError:
+        return None
+    matched = [p for p in prods if classify_confidence(item, p.get("title", ""))[0] in ("High", "Medium")]
+    out = []
+    for p in matched[:SHOPIFY_MAX_PRODUCTS]:
+        handle = p.get("handle") or (re.search(r"/products/([^/?#]+)", p.get("url") or "") or [None, None])[1]
+        variants = shopify_variant_listings(base, handle, p.get("title", ""), vendor.name, session) if handle else []
+        if variants:
+            out += variants
+        else:                                          # fall back to the search result's own price
+            price = parse_price(p.get("price"))
+            if price:
                 out.append(Listing(title=p.get("title", ""), url=urljoin(base, (p.get("url") or "").split("?")[0]),
                                    price=price, vendor=vendor.name, source="direct",
                                    in_stock=p.get("available") if isinstance(p.get("available"), bool) else None))
-            if out:
-                return out, f"Direct[{vendor.name}]: {len(out)} listings (Shopify search)"
-    except Exception:
-        pass
-    # ---- 2) search-engine fallback + JSON-LD ---------------------------------
+    note = (f"Direct[{vendor.name}]: Shopify search {len(prods)} results, {len(matched)} matching product(s), "
+            f"{len(out)} priced option(s)")
+    return out, note
+
+
+def page_listing(url: str, vendor_name: str, item: Item, session) -> tuple:
+    """Price one product page (JSON-LD, then meta tags, then Shopify .js). Returns (Listing|None, reason)."""
+    r = _get(session, url)
+    if r is None:
+        return None, "network error"
+    if r.status_code in _BLOCKED_STATUSES:
+        return None, f"site blocked automated access (HTTP {r.status_code})"
+    if not r.ok:
+        return None, f"HTTP {r.status_code}"
+    info = parse_jsonld_product(r.text) or parse_meta_price(r.text)
+    if not info or not info.get("price"):
+        m = re.search(r"/products/([^/?#]+)", urlparse(url).path)
+        if m:                                                    # Shopify page without structured data
+            parts = urlparse(url)
+            vs = shopify_variant_listings(f"{parts.scheme}://{parts.netloc}", m.group(1), item.product, vendor_name, session)
+            if vs:
+                return vs, "ok"
+        return None, "no price data on page"
+    return [Listing(title=info.get("name") or item.product, url=url, price=info["price"], vendor=vendor_name,
+                    source="direct", in_stock=info.get("in_stock"))], "ok"
+
+
+def direct_vendor_listings(vendor: Vendor, item: Item, session) -> tuple:
+    """
+    Price a product on a direct-to-consumer site. Returns (listings, note); never raises.
+      1) Shopify JSON search + variants (exact pack-size prices).
+      2) The site's sitemap -> best-matching product URL -> page JSON-LD.  (rarely blocked)
+      3) 'site:' search on DuckDuckGo, DuckDuckGo Lite, then Bing -> page JSON-LD.  (often blocked)
+    """
+    tag = f"Direct[{vendor.name}]"
+    if not vendor.domain:
+        return [], f"{tag}: N/A (no domain known; add a 'Domain' column to the vendor tab)"
     try:
-        r = session.post("https://html.duckduckgo.com/html/", headers=headers, timeout=HTTP_TIMEOUT,
-                         data={"q": f"site:{vendor.domain} {query}"})
-        if r.status_code != 200:
-            return [], f"Direct[{vendor.name}]: N/A (search engine returned HTTP {r.status_code})"
-        bare = vendor.domain.replace("www.", "")
-        links, seen = [], set()
-        for raw in re.findall(r"uddg=([^&\"']+)", r.text):
-            u = unquote(raw)
-            if urlparse(u).netloc.replace("www.", "").endswith(bare) and u not in seen:
-                seen.add(u)
-                links.append(u)
-        out = []
-        for u in links[:2]:
-            time.sleep(1)
-            page = session.get(u, headers=headers, timeout=HTTP_TIMEOUT)
-            info = parse_jsonld_product(page.text) if page.ok else None
-            if info:
-                out.append(Listing(title=info["name"] or query, url=u, price=info["price"],
-                                   vendor=vendor.name, source="direct", in_stock=info["in_stock"]))
+        res = shopify_listings(vendor, item, session)
+        if res is not None:
+            return res
+        links, how = rank_product_urls(sitemap_links(vendor.domain, session), item, vendor), "sitemap"
+        if not links:
+            found, how = search_engine_links(vendor.domain, build_query(item, include_specs=False), session)
+            links = rank_product_urls(found, item, vendor)
+            if not links:
+                return [], f"{tag}: N/A (no product page in sitemap; {how})"
+        out, problems = [], []
+        for u in links:
+            ls, why = page_listing(u, vendor.name, item, session)
+            out += ls or []
+            if not ls:
+                problems.append(why)
+            time.sleep(0.5)
         if out:
-            return out, f"Direct[{vendor.name}]: {len(out)} listings (page JSON-LD)"
-        return [], f"Direct[{vendor.name}]: N/A (no readable product page found)"
+            return out, f"{tag}: {len(out)} listing(s) via {how}"
+        return [], f"{tag}: N/A (found {urlparse(links[0]).path} via {how}, but {problems[0]})"
     except Exception as e:
-        return [], f"Direct[{vendor.name}]: N/A ({type(e).__name__})"
+        return [], f"{tag}: N/A ({type(e).__name__}: {e})"[:200]
+
+
+def product_url_listings(item: Item, ctx: "Context") -> tuple:
+    """Price the exact pages listed in the Master Sheet's optional 'Product URLs' column.
+    Returns (listings, note, set_of_domains_covered)."""
+    out, notes, covered = [], [], set()
+    for u in item.urls:
+        host = urlparse(u).netloc.lower().replace("www.", "")
+        covered.add(host)
+        vname = next((v.name for v in ctx.primary if v.domain and host.endswith(v.domain.replace("www.", ""))), host)
+        ls, why = page_listing(u, vname, item, ctx.session)
+        out += ls or []
+        notes.append(f"{host}: {'ok' if ls else why}")
+        time.sleep(0.5)
+    return out, "Product URLs[" + "; ".join(notes) + "]", covered
 
 
 def vendor_name_matches_product(vendor_name: str, item: Item) -> bool:
@@ -883,7 +1119,7 @@ def score_listings(item: Item, listings: list, ctx: Context) -> list:
     """Fill in pack size, unit price, vendor class, confidence, and eligibility for every listing."""
     for l in listings:
         l.vkey = vendor_key(l.vendor)
-        l.pack_qty = extract_pack_qty(l.title) if l.source != "direct" else 1
+        l.pack_qty = extract_pack_qty(l.title)
         l.unit_price = round(l.price / max(l.pack_qty, 1), 2)
         l.is_primary = any(keys_match(l.vkey, v.key) for v in ctx.primary)
         on_secondary_list = any(keys_match(l.vkey, k) for k in ctx.secondary_keys) or l.source == "ebay"
@@ -963,14 +1199,22 @@ def process_item(item: Item, ctx: Context) -> tuple:
     a = ctx.args
     listings, notes = [], []
 
+    # --- Exact pages you listed in the Master Sheet ("Product URLs" column, optional) ---
+    covered = set()
+    if item.urls and not a.no_direct:
+        ls, note, covered = product_url_listings(item, ctx)
+        listings += ls
+        notes.append(note)
+
     # --- Direct-to-consumer sites whose name loosely matches the product -------
     if not a.no_direct:
         for v in ctx.primary:
             if v.is_dtc and vendor_name_matches_product(v.name, item):
-                ls, note = direct_vendor_listings(v, build_query(item, include_specs=False), ctx.session)
+                if v.domain and v.domain.replace("www.", "") in covered:
+                    continue                      # you already gave us this vendor's exact page
+                ls, note = direct_vendor_listings(v, item, ctx.session)
                 listings += ls
                 notes.append(note)
-                time.sleep(1)
 
     # --- Pipeline A: Google Shopping via SerpApi --------------------------------
     serp_ls = []
@@ -1026,18 +1270,29 @@ def process_item(item: Item, ctx: Context) -> tuple:
     at_target = [l for l in rep if tgt and l.unit_price <= tgt]
     lowest = min((l.unit_price for l in rep), default=None)
 
-    def store(pool):      # store an average only when the sample is big enough to trust as trend data
+    def store(pool):      # always record the average; its sample size is stored beside it
         s = stats[pool]
-        return s["avg"] if s and s["n"] >= MARKET_MIN_SAMPLE else None
+        return s["avg"] if s else None
+
+    def sample(pool):
+        s = stats[pool]
+        return s["n"] if s else None
+
+    for pool, label in (("new", "New"), ("res", "Resale")):
+        s = stats[pool]
+        if s and s["n"] < MARKET_MIN_SAMPLE:
+            notes.append(f"Avg ({label}) from only {s['n']} listing(s): recorded, but deal rules and the "
+                         f"30-day trend need {MARKET_MIN_SAMPLE}+")
 
     run_row = {
         "RowDateTime": ctx.now, "runID": ctx.run_id, "WishlistItem": item.wid, "Product": item.product,
-        "Listings Searched": len(listings),
+        "Listings Searched": len(listings), "Matching Listings": sum(1 for l in listings if l.eligible),
         "Unique Websites Searched": len({l.vkey for l in listings if l.vkey}),
         "Target Price or better found": len(at_target),
         "Primary Vendor Price or Better": sum(1 for l in at_target if l.is_primary),
         "Deals found": len(deals), "Primary Vendor Deals": sum(1 for l in deals if l.is_primary),
         "Avg Price (New)": store("new"), "Avg Price (Resale)": store("res"),
+        "Avg Sample (New)": sample("new"), "Avg Sample (Resale)": sample("res"),
         "30d Trend (New)": trends["new"], "30d Trend (Resale)": trends["res"],
         "Lowest Price Found": lowest, "Source Notes": " | ".join(notes)[:900]}
 
@@ -1133,7 +1388,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--locations", default="", help="';'-separated location filter, e.g. 'Master Bedroom; Overall'")
     p.add_argument("--items", default="", help="comma-separated WishlistItem ids, e.g. 1,3")
     p.add_argument("--max-items", type=int, default=0, help="cap how many items run (highest priority first)")
-    p.add_argument("--force", action="store_true", help="ignore the per-priority cadence (CADENCE_DAYS)")
+    p.add_argument("--force", "--allproducts", dest="force", action="store_true",
+                   help="check every selected product now, ignoring the per-priority cadence (CADENCE_DAYS)")
     p.add_argument("--no-serpapi", action="store_true")
     p.add_argument("--no-ebay", action="store_true")
     p.add_argument("--no-direct", action="store_true")
@@ -1176,7 +1432,26 @@ def select_items(items: list, args: argparse.Namespace, history: list, now: date
     return chosen[:args.max_items] if args.max_items else chosen
 
 
+def load_dotenv(path: Path) -> None:
+    """Minimal .env reader for local runs (Cursor/VS Code terminal). Lines like SERPAPI_KEY=abc123.
+    Existing environment variables win, so GitHub Actions secrets are never overridden.
+    NEVER commit .env - the repo is public. It is listed in .gitignore."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip().removeprefix("export ").strip(), v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
+    except OSError:
+        pass
+
+
 def main(argv=None) -> int:
+    for env_file in (Path(".env"), Path(__file__).resolve().with_name(".env")):
+        load_dotenv(env_file)
     args = parse_args(argv)
     try:
         path = find_workbook(args.workbook)
@@ -1205,7 +1480,12 @@ def main(argv=None) -> int:
                   ebay=EbayClient(os.getenv("EBAY_CLIENT_ID"), os.getenv("EBAY_CLIENT_SECRET")),
                   session=requests.Session(), args=args)
     if not args.no_serpapi:
+        if ctx.serp.disabled:
+            log("WARNING: SERPAPI_KEY is not set - Google Shopping (the main source for Amazon, Best Buy, "
+                "Home Depot and every unlisted retailer) is OFF. Add it to .env locally or to repo secrets on GitHub.")
         ctx.serp.check_credits()
+    if not args.no_ebay and ctx.ebay.disabled and any(i.open_used for i in todo):
+        log("NOTE: eBay keys not set - used/refurbished listings will only come from Google Shopping.")
 
     outcomes = []
     for it in todo:
