@@ -1,0 +1,12 @@
+# Local secrets - NEVER commit (this repository is public)
+.env
+
+# Python / editor clutter
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Excel lock files and the script's temporary save file
+~$*.xlsx
+*.xlsx.tmp
