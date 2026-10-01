@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wishlist prices</title>
+<!--
+  Wishlist price dashboard (single file, no build step, no JS libraries).
+  - Loads "Home Wishlist.xlsx" live from the private GitHub repo via the GitHub REST API,
+    using a fine-grained, read-only personal access token you paste in once.
+  - Or open/drag in a local copy of the workbook.
+  - Reads Master Sheet, Run Data and Deals Data (written by price_tracker.py). Never writes anything.
+  Fonts load from Google Fonts when online; system fonts are used otherwise.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ---------- Design tokens: Minimalist Dark, accent #D46B55 ---------- */
+:root{
+  --bg:#0A0A0F; --bg-alt:#12121A; --muted:#1A1A24;
+  --fg:#FAFAFA; --fg-soft:#A1A1AA; --fg-muted:#71717A;
+  --accent:#D46B55; --accent-fg:#0A0A0F; --accent-muted:rgba(212,107,85,.15); --accent-glow:rgba(212,107,85,.4);
+  --border:rgba(255,255,255,.08); --border-hover:rgba(255,255,255,.15);
+  --card:rgba(26,26,36,.6); --card-solid:#1A1A24;
+  --r-md:8px; --r-lg:12px;
+  --display:"Space Grotesk", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --body:"Inter", ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg); color:var(--fg); font-family:var(--body); font-size:15px; line-height:1.55;
+  -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums;
+  padding:env(safe-area-inset-top,0) env(safe-area-inset-right,0) env(safe-area-inset-bottom,0) env(safe-area-inset-left,0);
+}
+a{color:inherit}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+.shell{max-width:1280px;margin:0 auto;padding:48px 32px 96px;position:relative}
+@media (max-width:640px){.shell{padding:28px 16px 64px}}
+
+/* ---------- Header ---------- */
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-bottom:40px}
+h1{font-family:var(--display);font-weight:600;font-size:clamp(30px,3.4vw,44px);letter-spacing:-.025em;line-height:1.05;margin:0}
+.status{color:var(--fg-soft);font-size:14px;margin-top:10px}
+.status strong{color:var(--fg);font-weight:500}
+.actions{display:flex;gap:10px}
+
+.btn{
+  display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 16px;border-radius:var(--r-md);
+  background:var(--muted);border:1px solid var(--border);cursor:pointer;font-size:14px;font-weight:500;
+  transition:border-color .2s, box-shadow .2s, background .2s;
+}
+.btn:hover{border-color:var(--border-hover)}
+.btn svg{width:16px;height:16px;flex:none}
+.btn-primary{background:var(--accent);color:var(--accent-fg);border-color:transparent;font-weight:600}
+.btn-primary:hover{box-shadow:0 0 20px var(--accent-glow);border-color:transparent}
+.btn[disabled]{opacity:.5;cursor:default;box-shadow:none}
+.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.alert{margin:0 0 24px;padding:12px 16px;border-radius:var(--r-md);border:1px solid rgba(212,107,85,.35);background:var(--accent-muted);font-size:14px}
+.alert[hidden]{display:none}
+
+/* ---------- Filters ---------- */
+.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:28px}
+.ms{position:relative}
+.ms-btn{
+  display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 12px 0 14px;border-radius:var(--r-md);
+  background:var(--bg-alt);border:1px solid var(--border);cursor:pointer;font-size:14px;
+}
+.ms-btn:hover,.ms-btn[aria-expanded="true"]{border-color:var(--border-hover)}
+.ms-btn .lbl{color:var(--fg-soft)}
+.ms-btn svg{width:14px;height:14px;color:var(--fg-muted)}
+.ms-pop{
+  position:absolute;z-index:20;top:calc(100% + 6px);left:0;min-width:220px;padding:6px;border-radius:var(--r-lg);
+  background:rgba(18,18,26,.92);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border:1px solid var(--border-hover);box-shadow:0 16px 40px rgba(0,0,0,.5);
+}
+.ms-pop[hidden]{display:none}
+.ms-opt{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:14px}
+.ms-opt:hover{background:rgba(255,255,255,.04)}
+.ms-opt input{accent-color:var(--accent);width:15px;height:15px;margin:0}
+.ms-foot{display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:6px;padding:6px 4px 2px}
+.link-btn{background:none;border:0;padding:4px 6px;color:var(--fg-soft);font-size:13px;cursor:pointer;border-radius:6px}
+.link-btn:hover{color:var(--fg)}
+
+.chips{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;padding:3px;border-radius:var(--r-md);background:var(--bg-alt);border:1px solid var(--border)}
+.chips .cap{white-space:nowrap;color:var(--fg-soft);font-size:14px;padding:0 6px 0 10px}
+.chip{
+  height:30px;padding:0 12px;border-radius:6px;border:1px solid transparent;background:transparent;cursor:pointer;
+  font-size:13px;color:var(--fg-muted);display:inline-flex;align-items:center;gap:7px;transition:background .2s,color .2s;
+}
+.chip b{font-weight:600;color:inherit}
+.chip[aria-pressed="true"]{background:var(--muted);color:var(--fg);border-color:var(--border)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--fg-muted);flex:none}
+.dot.high{background:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.dot.medium{background:var(--fg-soft)}
+.spacer{flex:1}
+.seg{display:inline-flex;padding:3px;border-radius:var(--r-md);background:var(--bg-alt);border:1px solid var(--border)}
+.seg button{height:30px;padding:0 14px;border-radius:6px;border:0;background:transparent;color:var(--fg-muted);cursor:pointer;font-size:13px;font-weight:500}
+.seg button[aria-checked="true"]{background:var(--accent-muted);color:var(--fg);box-shadow:inset 0 0 0 1px rgba(212,107,85,.35)}
+.seg button[disabled]{opacity:.4;cursor:default}
+
+/* ---------- Glass cards ---------- */
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);position:relative;
+}
+.orb{position:absolute;pointer-events:none;border-radius:50%;filter:blur(90px);opacity:.16;background:var(--accent);z-index:-1}
+
+/* ---------- Focus (chart + deal links) ---------- */
+.focus{display:grid;grid-template-columns:minmax(0,1fr) 340px;margin-bottom:28px;overflow:hidden}
+@media (max-width:1040px){.focus{grid-template-columns:minmax(0,1fr)}}
+.focus-head > div:first-child{min-width:0;flex:1 1 280px}
+@media (max-width:640px){.focus-main{padding:22px 18px 16px}.deals{padding:22px 18px 16px}.focus .figure{text-align:left}}
+.focus-main{padding:28px 28px 20px}
+.focus-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;flex-wrap:wrap;margin-bottom:18px}
+.picker{position:relative;display:inline-block;max-width:100%}
+.picker select{
+  appearance:none;-webkit-appearance:none;background:transparent;border:0;padding:0 30px 0 0;cursor:pointer;
+  font-family:var(--display);font-size:clamp(22px,2.2vw,28px);font-weight:600;letter-spacing:-.02em;color:var(--fg);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.picker select option{background:var(--card-solid);font-family:var(--body);font-size:15px}
+.picker svg{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:var(--fg-muted);pointer-events:none}
+.meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.tag{font-size:12.5px;color:var(--fg-soft);padding:3px 9px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.02)}
+.tag.warn{border-color:rgba(212,107,85,.35);color:var(--fg)}
+.figure{text-align:right}
+.figure .big{font-family:var(--display);font-size:clamp(30px,3vw,40px);font-weight:600;letter-spacing:-.02em;line-height:1}
+.figure .sub{color:var(--fg-soft);font-size:13.5px;margin-top:8px}
+.figure .sub .down{color:var(--fg)}
+.chart-tools{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0 8px}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--fg-soft)}
+.legend i{display:inline-block;width:18px;height:0;border-top:2px solid var(--fg);vertical-align:middle;margin-right:7px}
+.legend i.avg{border-color:var(--accent);box-shadow:0 0 8px var(--accent-glow)}
+.legend i.tgt{border-top:2px dashed rgba(255,255,255,.35)}
+.chart{position:relative;width:100%}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.tip{
+  position:absolute;pointer-events:none;padding:8px 11px;border-radius:var(--r-md);font-size:13px;white-space:nowrap;
+  background:rgba(18,18,26,.95);border:1px solid var(--border-hover);transform:translate(-50%,calc(-100% - 12px));opacity:0;transition:opacity .12s;
+}
+.tip strong{font-family:var(--display);font-size:15px;display:block}
+.tip span{color:var(--fg-soft)}
+.empty{display:grid;place-items:center;text-align:center;min-height:280px;color:var(--fg-soft);padding:24px;font-size:14.5px}
+.empty p{max-width:44ch;margin:0}
+
+.deals{border-left:1px solid var(--border);padding:28px 22px 20px;background:rgba(10,10,15,.35);max-height:560px;overflow:auto}
+@media (max-width:1040px){.deals{border-left:0;border-top:1px solid var(--border);max-height:none}}
+.deals h2,.summary h2{font-family:var(--display);font-size:18px;font-weight:600;letter-spacing:-.01em;margin:0}
+.deals .count{color:var(--fg-soft);font-size:13.5px;margin:4px 0 16px}
+.deal{padding:14px 0;border-top:1px solid var(--border)}
+.deal:first-of-type{border-top:0;padding-top:4px}
+.deal-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.deal .price{font-family:var(--display);font-size:20px;font-weight:600;letter-spacing:-.01em}
+.deal .vendor{min-width:0;font-weight:500;font-size:14px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.deal .title{color:var(--fg-soft);font-size:13px;margin:4px 0 8px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.deal .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--fg-soft)}
+.badge.conf-High{color:var(--fg);border-color:rgba(212,107,85,.35);background:var(--accent-muted)}
+.deal a.open{margin-left:auto;font-size:13px;font-weight:500;text-decoration:none;color:var(--fg);border-bottom:1px solid rgba(212,107,85,.6);padding-bottom:1px}
+.deal a.open:hover{border-color:var(--accent)}
+.deal .why{color:var(--fg-muted);font-size:12px;margin-top:6px}
+
+/* ---------- Summary table ---------- */
+.summary{padding:24px 0 8px}
+.summary-head{display:flex;justify-content:space-between;align-items:baseline;padding:0 24px 14px}
+.summary-head p{margin:0;color:var(--fg-soft);font-size:13.5px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:860px}
+th{text-align:left;font-weight:500;color:var(--fg-muted);font-size:13px;padding:10px 16px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:14px 16px;border-bottom:1px solid var(--border);white-space:nowrap}
+th.num,td.num{text-align:right}
+tbody tr{transition:background .15s}
+tbody tr:hover{background:rgba(255,255,255,.025)}
+tbody tr.active{background:var(--accent-muted)}
+tbody tr:last-child td{border-bottom:0}
+td:first-child,th:first-child{padding-left:24px}
+td:last-child,th:last-child{padding-right:24px}
+.prod-btn{background:none;border:0;padding:0;cursor:pointer;font-weight:500;text-align:left;font-size:14.5px}
+.prod-btn:hover{text-decoration:underline;text-decoration-color:rgba(212,107,85,.6);text-underline-offset:4px}
+.muted{color:var(--fg-muted)}
+.soft{color:var(--fg-soft)}
+
+/* ---------- Connect screen / dialog ---------- */
+.connect{max-width:560px;margin:8vh auto 0;padding:36px;position:relative}
+.connect h2{font-family:var(--display);font-size:26px;font-weight:600;letter-spacing:-.02em;margin:0 0 8px}
+.connect > p{color:var(--fg-soft);margin:0 0 24px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field.full{grid-column:1 / -1}
+.field label{font-size:13px;color:var(--fg-soft)}
+.field input[type=text],.field input[type=password]{
+  height:40px;padding:0 12px;border-radius:var(--r-md);background:var(--bg);border:1px solid var(--border);
+}
+.field input:focus{border-color:rgba(212,107,85,.6);outline:none;box-shadow:0 0 0 3px var(--accent-muted)}
+.hint{font-size:12.5px;color:var(--fg-muted)}
+.check{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--fg-soft);grid-column:1 / -1}
+.check input{accent-color:var(--accent)}
+.form-actions{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:22px;flex-wrap:wrap}
+.or{color:var(--fg-soft);font-size:13.5px}
+.or label{color:var(--fg);text-decoration:underline;text-decoration-color:rgba(212,107,85,.6);text-underline-offset:3px;cursor:pointer}
+dialog{border:0;padding:0;background:transparent;color:var(--fg);max-width:min(600px,94vw);width:100%}
+dialog::backdrop{background:rgba(5,5,8,.7);backdrop-filter:blur(4px)}
+dialog .connect{margin:0}
+.close-x{position:absolute;top:16px;right:16px}
+.drop{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(10,10,15,.85);border:2px dashed rgba(212,107,85,.6);font-family:var(--display);font-size:22px}
+.drop[hidden]{display:none}
+
+/* one orchestrated entrance when data first appears */
+.reveal{animation:reveal .5s ease-out both}
+@keyframes reveal{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div>
+      <h1>Wishlist prices</h1>
+      <div class="status" id="status" aria-live="polite">Not connected</div>
+    </div>
+    <div class="actions" id="actions" hidden>
+      <button class="btn" id="refreshBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        Refresh
+      </button>
+      <button class="btn" id="connBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>
+        Connection
+      </button>
+    </div>
+  </header>
+
+  <div class="alert" id="alert" role="alert" hidden></div>
+
+  <!-- Connect panel: shown inline before data loads, moved into the dialog afterwards -->
+  <div id="connectHome">
+    <section class="card connect" id="connectPanel">
+      <div class="orb" style="width:260px;height:260px;top:-60px;right:-80px"></div>
+      <h2>Connect your wishlist workbook</h2>
+      <p>Reads the latest Home Wishlist.xlsx from your private GitHub repo. Nothing is ever written back.</p>
+      <form id="connectForm" class="form-grid" autocomplete="off">
+        <div class="field"><label for="fOwner">Owner</label><input type="text" id="fOwner" spellcheck="false"></div>
+        <div class="field"><label for="fRepo">Repository</label><input type="text" id="fRepo" spellcheck="false"></div>
+        <div class="field"><label for="fBranch">Branch</label><input type="text" id="fBranch" spellcheck="false"></div>
+        <div class="field"><label for="fPath">Workbook file</label><input type="text" id="fPath" spellcheck="false"></div>
+        <div class="field full">
+          <label for="fToken">GitHub token</label>
+          <input type="password" id="fToken" spellcheck="false" placeholder="github_pat_…">
+          <span class="hint">Fine-grained token with read-only Contents access to this one repository.</span>
+        </div>
+        <label class="check"><input type="checkbox" id="fRemember"> Remember the token on this device</label>
+        <div class="form-actions full field">
+          <button class="btn btn-primary" type="submit" id="connectBtn">Connect</button>
+          <span class="or">or <label for="fileInput">open a local .xlsx</label> (you can also drag it onto the page)</span>
+        </div>
+      </form>
+      <input type="file" id="fileInput" accept=".xlsx" class="sr-only">
+    </section>
+  </div>
+
+  <main id="dash" hidden>
+    <div class="filters" role="group" aria-label="Filters">
+      <div class="ms" id="msLoc"></div>
+      <div class="ms" id="msPri"></div>
+      <div class="chips" role="group" aria-label="Deal confidence">
+        <span class="cap">Deal confidence</span>
+        <span id="confChips"></span>
+      </div>
+      <span class="spacer"></span>
+      <div class="seg" role="radiogroup" aria-label="Time window" id="winSeg">
+        <button type="button" role="radio" data-days="30" aria-checked="true">30 days</button>
+        <button type="button" role="radio" data-days="90" aria-checked="false">90 days</button>
+      </div>
+    </div>
+
+    <section class="card focus reveal" id="focus" aria-label="Selected product">
+      <div class="orb" style="width:420px;height:300px;top:-140px;left:20%"></div>
+      <div class="focus-main" id="focusMain"></div>
+      <aside class="deals" id="dealsPane" aria-label="Deal links for the selected product"></aside>
+    </section>
+
+    <section class="card summary reveal" style="animation-delay:.08s" aria-labelledby="sumTitle">
+      <div class="summary-head">
+        <h2 id="sumTitle">All products</h2>
+        <p id="sumNote"></p>
+      </div>
+      <div class="table-wrap"><table id="sumTable"></table></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="connDialog" aria-label="Connection settings">
+  <div id="dialogSlot"></div>
+</dialog>
+<div class="drop" id="drop" hidden>Drop the workbook to load it</div>
+
+<script>
+'use strict';
+/* ============================================================================
+   Settings
+   ========================================================================== */
+const DEFAULTS = { owner: 'jjbrands4', repo: 'HomeImprovement', branch: 'main', path: 'Home Wishlist.xlsx' };
+const STORE_KEY = 'wishlistDashboard.v1';
+const DAY = 864e5;
+
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = v => (v == null || isNaN(v)) ? '–' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v);
+const norm = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const num = v => {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (v == null || v === '') return null;
+  const n = parseFloat(String(v).replace(/[$,]/g, ''));
+  return isNaN(n) ? null : n;
+};
+const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+const safeUrl = u => /^https?:\/\//i.test(String(u || '')) ? String(u) : null;
+
+function ago(d) {
+  if (!d) return 'never';
+  const s = (Date.now() - d.getTime()) / 1000;
+  if (s < 90) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  const days = Math.round(s / 86400);
+  return days === 1 ? 'yesterday' : `${days} days ago`;
+}
+const shortDate = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+function loadPrefs() { try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch { return {}; } }
+function savePrefs(p) { try { localStorage.setItem(STORE_KEY, JSON.stringify(p)); } catch { /* storage unavailable */ } }
+
+/* ============================================================================
+   Minimal .xlsx reader (zip + XML). Uses the browser's built-in DecompressionStream.
+   ========================================================================== */
+function openZip(buffer) {
+  const dv = new DataView(buffer), u8 = new Uint8Array(buffer), td = new TextDecoder();
+  let eocd = -1;
+  for (let i = buffer.byteLength - 22; i >= Math.max(0, buffer.byteLength - 65557); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('That file is not an .xlsx workbook.');
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const entries = {};
+  for (let n = 0; n < count && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+    const nlen = dv.getUint16(p + 28, true), elen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+    const off = dv.getUint32(p + 42, true);
+    entries[td.decode(u8.subarray(p + 46, p + 46 + nlen))] = { method, csize, off };
+    p += 46 + nlen + elen + clen;
+  }
+  return {
+    async text(name) {
+      const e = entries[name];
+      if (!e) return null;
+      const start = e.off + 30 + dv.getUint16(e.off + 26, true) + dv.getUint16(e.off + 28, true);
+      const data = u8.subarray(start, start + e.csize);
+      if (e.method === 0) return td.decode(data);
+      if (e.method !== 8) throw new Error('The workbook uses an unsupported compression method.');
+      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return td.decode(await new Response(stream).arrayBuffer());
+    }
+  };
+}
+
+const colIndex = ref => { let n = 0; for (const ch of ref.replace(/\d+/g, '')) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; };
+
+async function readWorkbook(buffer) {
+  const zip = openZip(buffer);
+  const xml = async name => { const t = await zip.text(name); return t ? new DOMParser().parseFromString(t, 'application/xml') : null; };
+  const wb = await xml('xl/workbook.xml');
+  if (!wb) throw new Error('That file is not an .xlsx workbook.');
+  const rels = await xml('xl/_rels/workbook.xml.rels');
+  const relMap = {};
+  for (const r of rels.getElementsByTagNameNS('*', 'Relationship')) relMap[r.getAttribute('Id')] = r.getAttribute('Target');
+  const strings = [];
+  const ssx = await xml('xl/sharedStrings.xml');
+  if (ssx) for (const si of ssx.getElementsByTagNameNS('*', 'si')) {
+    let s = '';
+    for (const t of si.getElementsByTagNameNS('*', 't')) if (t.parentNode.localName !== 'rPh') s += t.textContent;
+    strings.push(s);
+  }
+  const paths = {};
+  for (const sh of wb.getElementsByTagNameNS('*', 'sheet')) {
+    const rid = sh.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id') || sh.getAttribute('r:id');
+    const target = relMap[rid];
+    if (target) paths[sh.getAttribute('name')] = target.startsWith('/') ? target.slice(1) : 'xl/' + target.replace(/^\.\//, '');
+  }
+  async function rows(name) {
+    if (!paths[name]) return null;
+    const doc = await xml(paths[name]);
+    const out = [];
+    let rowCursor = 0;
+    for (const row of doc.getElementsByTagNameNS('*', 'row')) {
+      const r = row.getAttribute('r') ? parseInt(row.getAttribute('r'), 10) - 1 : rowCursor;
+      rowCursor = r + 1;
+      const arr = [];
+      let colCursor = 0;
+      for (const c of row.getElementsByTagNameNS('*', 'c')) {
+        const ref = c.getAttribute('r');
+        const col = ref ? colIndex(ref) : colCursor;
+        colCursor = col + 1;
+        const t = c.getAttribute('t'), v = c.getElementsByTagNameNS('*', 'v')[0];
+        let val = null;
+        if (t === 's') val = v ? strings[+v.textContent] : null;
+        else if (t === 'inlineStr') val = [...c.getElementsByTagNameNS('*', 't')].map(x => x.textContent).join('');
+        else if (t === 'b') val = v ? v.textContent === '1' : null;
+        else if (t === 'str' || t === 'e') val = v ? v.textContent : null;
+        else val = v ? Number(v.textContent) : null;
+        arr[col] = val;
+      }
+      out[r] = arr;
+    }
+    return out;
+  }
+  return { names: Object.keys(paths), rows };
+}
+
+/* ============================================================================
+   Workbook -> data model
+   ========================================================================== */
+function toObjects(rows) {
+  if (!rows || !rows[0]) return [];
+  const hdr = rows[0].map(norm);
+  return rows.slice(1).filter(r => r && r.some(v => v != null && v !== '')).map(r => {
+    const o = {};
+    hdr.forEach((h, i) => { if (h) o[h] = r[i] ?? null; });
+    return o;
+  });
+}
+function pick(o, ...keys) {             // exact header match first, then "starts with"
+  for (const k of keys) if (o[norm(k)] !== undefined) return o[norm(k)];
+  for (const k of keys) { const hit = Object.keys(o).find(x => x.startsWith(norm(k))); if (hit) return o[hit]; }
+  return null;
+}
+function toDate(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return new Date(Math.round((v - 25569) * DAY));   // Excel serial (UTC)
+  const s = String(v).trim().replace(' ', 'T');
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s + 'Z');
+  return isNaN(d) ? null : d;
+}
+function dateFromRunId(id) {
+  const m = /^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)/.exec(String(id || ''));
+  return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6])) : null;
+}
+const yes = v => /^(yes|y|true|1(\.0)?)$/i.test(String(v ?? '').trim());
+const wid = v => String(v ?? '').trim().replace(/\.0$/, '');
+
+async function buildModel(buffer) {
+  const wb = await readWorkbook(buffer);
+  const need = ['Master Sheet', 'Run Data', 'Deals Data'];
+  const missing = need.filter(n => !wb.names.includes(n));
+  if (missing.length) throw new Error(`The workbook is missing the ${missing.join(', ')} tab. Check that you opened Home Wishlist.xlsx.`);
+
+  const items = toObjects(await wb.rows('Master Sheet')).filter(o => pick(o, 'Product')).map(o => ({
+    wid: wid(pick(o, 'WishlistItem')), product: String(pick(o, 'Product')).trim(),
+    location: String(pick(o, 'Location') ?? '').trim() || 'Unassigned',
+    priority: Math.round(num(pick(o, 'Priority')) ?? 3), target: num(pick(o, 'Target Price')),
+    openUsed: yes(pick(o, 'Open to used')), qty: num(pick(o, 'Quantity Needed')),
+  }));
+
+  const runs = toObjects(await wb.rows('Run Data')).map(o => ({
+    dt: toDate(pick(o, 'RowDateTime')) || dateFromRunId(pick(o, 'runID')), runId: String(pick(o, 'runID') ?? ''),
+    wid: wid(pick(o, 'WishlistItem')), listings: num(pick(o, 'Listings Searched')),
+    avgNew: num(pick(o, 'Avg Price (New)')), avgRes: num(pick(o, 'Avg Price (Resale)')),
+    lowest: num(pick(o, 'Lowest Price Found')), notes: String(pick(o, 'Source Notes') ?? ''),
+  })).filter(r => r.dt);
+  const runDates = new Map(runs.map(r => [r.runId, r.dt]));
+
+  const deals = toObjects(await wb.rows('Deals Data')).map(o => {
+    const runId = String(pick(o, 'runID') ?? '');
+    return {
+      runId, dt: runDates.get(runId) || dateFromRunId(runId), wid: wid(pick(o, 'WishlistItem')),
+      url: String(pick(o, 'URL') ?? '').trim(), price: num(pick(o, 'Price')),
+      conf: String(pick(o, 'RightProductConfidence') ?? 'Low').trim() || 'Low',
+      isPrimary: yes(pick(o, 'isPrimaryVendor')), vendor: String(pick(o, 'Vendor') ?? ''),
+      condition: String(pick(o, 'Condition') ?? ''), packQty: num(pick(o, 'Pack Qty')) || 1,
+      listed: num(pick(o, 'Listed Price')), rule: String(pick(o, 'Deal Rule') ?? ''),
+      resale: yes(pick(o, 'Secondary Vendor?')), comments: String(pick(o, 'Secondary Vendor Comments') ?? ''),
+      inStock: String(pick(o, 'In Stock Verified') ?? ''), title: String(pick(o, 'Listing Title') ?? ''),
+    };
+  }).filter(d => d.dt && d.url);
+  return { items, runs, deals };
+}
+
+/* ============================================================================
+   Loading: GitHub (live) or local file
+   ========================================================================== */
+const state = {
+  data: null, source: null, sourceLabel: '', updatedAt: null,
+  sel: { loc: new Set(), pri: new Set(), conf: new Set(['High', 'Medium', 'Low']) },
+  windowDays: 30, pool: 'new', focus: null, token: null,
+};
+
+function showAlert(msg) { const a = $('#alert'); a.textContent = msg || ''; a.hidden = !msg; }
+
+async function loadFromGitHub(cfg, token) {
+  const encPath = cfg.path.split('/').map(encodeURIComponent).join('/');
+  const base = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}`;
+  const headers = { Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' };
+  let res;
+  try {
+    res = await fetch(`${base}/contents/${encPath}?ref=${encodeURIComponent(cfg.branch)}`,
+      { headers: { ...headers, Accept: 'application/vnd.github.raw+json' }, cache: 'no-store' });
+  } catch {
+    throw new Error('Could not reach GitHub. Check your internet connection, then select Refresh.');
+  }
+  if (res.status === 401) throw new Error('GitHub rejected the token. Create a new fine-grained token with read-only Contents access to the repository and connect again.');
+  if (res.status === 403) throw new Error('GitHub refused the request (rate limit or missing permission). Make sure the token has Contents: Read-only for this repository.');
+  if (res.status === 404) throw new Error(`GitHub could not find ${cfg.path} on ${cfg.owner}/${cfg.repo}@${cfg.branch}. File names are case-sensitive and include spaces.`);
+  if (!res.ok) throw new Error(`GitHub returned HTTP ${res.status} while loading the workbook.`);
+  const buffer = await res.arrayBuffer();
+
+  let updatedAt = null;      // last commit touching the workbook (optional, failure is fine)
+  try {
+    const c = await fetch(`${base}/commits?path=${encodeURIComponent(cfg.path)}&sha=${encodeURIComponent(cfg.branch)}&per_page=1`,
+      { headers: { ...headers, Accept: 'application/vnd.github+json' }, cache: 'no-store' });
+    if (c.ok) { const j = await c.json(); updatedAt = j[0] ? new Date(j[0].commit.committer.date) : null; }
+  } catch { /* ignore */ }
+  return { buffer, updatedAt };
+}
+
+async function ingest(buffer, source, label, updatedAt) {
+  const data = await buildModel(buffer);
+  const first = !state.data;
+  state.data = data; state.source = source; state.sourceLabel = label; state.updatedAt = updatedAt;
+  const locs = [...new Set(data.items.map(i => i.location))];
+  const pris = [...new Set(data.items.map(i => i.priority))];
+  if (first) { state.sel.loc = new Set(locs); state.sel.pri = new Set(pris); }
+  else {                                                     // keep choices; add new options as selected
+    locs.forEach(l => { if (!knownLocs.has(l)) state.sel.loc.add(l); });
+    pris.forEach(p => { if (!knownPris.has(p)) state.sel.pri.add(p); });
+  }
+  knownLocs = new Set(locs); knownPris = new Set(pris);
+  if (!data.items.some(i => i.wid === state.focus)) state.focus = null;
+  showAlert('');
+  showDashboard();
+  render();
+}
+let knownLocs = new Set(), knownPris = new Set();
+
+function readForm() {
+  return {
+    owner: $('#fOwner').value.trim() || DEFAULTS.owner, repo: $('#fRepo').value.trim() || DEFAULTS.repo,
+    branch: $('#fBranch').value.trim() || DEFAULTS.branch, path: $('#fPath').value.trim() || DEFAULTS.path,
+  };
+}
+
+async function connect(cfg, token) {
+  const btn = $('#connectBtn'), refresh = $('#refreshBtn');
+  btn.disabled = true; btn.textContent = 'Connecting…'; refresh.classList.add('spin'); refresh.disabled = true;
+  try {
+    const { buffer, updatedAt } = await loadFromGitHub(cfg, token);
+    state.token = token;
+    await ingest(buffer, 'github', `${cfg.owner}/${cfg.repo}`, updatedAt);
+    if ($('#connDialog').open) $('#connDialog').close();
+  } catch (err) {
+    showAlert(err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Connect'; refresh.classList.remove('spin'); refresh.disabled = false;
+  }
+}
+
+async function loadLocalFile(file) {
+  if (!file) return;
+  try {
+    await ingest(await file.arrayBuffer(), 'file', file.name, new Date(file.lastModified));
+    if ($('#connDialog').open) $('#connDialog').close();
+  } catch (err) { showAlert(err.message || 'That file could not be read.'); }
+}
+
+function showDashboard() {
+  $('#dash').hidden = false; $('#actions').hidden = false;
+  if ($('#connectHome').contains($('#connectPanel'))) $('#dialogSlot').appendChild($('#connectPanel'));
+  if (!$('#connectPanel .close-x')) {
+    const x = document.createElement('button');
+    x.className = 'btn close-x'; x.type = 'button'; x.textContent = 'Close';
+    x.addEventListener('click', () => $('#connDialog').close());
+    $('#connectPanel').appendChild(x);
+  }
+  $('#refreshBtn').hidden = state.source !== 'github';
+}
+
+/* ============================================================================
+   Derived numbers
+   ========================================================================== */
+function visibleItems() {
+  return state.data.items.filter(i => state.sel.loc.has(i.location) && state.sel.pri.has(i.priority));
+}
+function windowStart() { return Date.now() - state.windowDays * DAY; }
+
+/** Latest row per unique URL in the time window for the given items. */
+function uniqueDeals(wids, applyConf = true) {
+  const start = windowStart(), latest = new Map();
+  for (const d of state.data.deals) {
+    if (!wids.has(d.wid) || d.dt.getTime() < start) continue;
+    const prev = latest.get(d.url);
+    if (!prev || d.dt > prev.dt) latest.set(d.url, d);
+  }
+  let out = [...latest.values()];
+  if (applyConf) out = out.filter(d => state.sel.conf.has(d.conf));
+  return out.sort((a, b) => (b.isPrimary && !b.resale) - (a.isPrimary && !a.resale) || a.price - b.price);
+}
+
+function stats(item, pool) {
+  const key = pool === 'resale' ? 'avgRes' : 'avgNew';
+  const runs = state.data.runs.filter(r => r.wid === item.wid).sort((a, b) => a.dt - b.dt);
+  const start = windowStart(), start30 = Date.now() - 30 * DAY;
+  const points = runs.filter(r => r.dt.getTime() >= start && r[key] != null).map(r => ({ t: r.dt.getTime(), v: r[key] }));
+  const avg30 = mean(runs.filter(r => r.dt.getTime() >= start30 && r[key] != null).map(r => r[key]));
+  const lows = runs.filter(r => r.dt.getTime() >= start && r.lowest != null).map(r => r.lowest);
+  return {
+    points, avg30, latest: points.length ? points[points.length - 1].v : null,
+    lowest: lows.length ? Math.min(...lows) : null,
+    lastChecked: runs.length ? runs[runs.length - 1].dt : null,
+    runsInWindow: runs.filter(r => r.dt.getTime() >= start).length,
+  };
+}
+
+/* ============================================================================
+   Filters UI
+   ========================================================================== */
+const CHEVRON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+
+function multiSelect(host, label, options, selected, onChange) {
+  const total = options.length, n = options.filter(o => selected.has(o.value)).length;
+  const summary = n === total ? 'All' : n === 0 ? 'None' : n === 1 ? options.find(o => selected.has(o.value)).label : `${n} selected`;
+  const wasOpen = host.querySelector('.ms-pop:not([hidden])') != null;
+  host.innerHTML = `
+    <button type="button" class="ms-btn" aria-haspopup="true" aria-expanded="${wasOpen}">
+      <span class="lbl">${esc(label)}</span> <span>${esc(summary)}</span> ${CHEVRON}
+    </button>
+    <div class="ms-pop" ${wasOpen ? '' : 'hidden'} role="group" aria-label="${esc(label)}">
+      ${options.map((o, i) => `<label class="ms-opt"><input type="checkbox" data-i="${i}" ${selected.has(o.value) ? 'checked' : ''}> ${esc(o.label)}</label>`).join('')}
+      <div class="ms-foot"><button type="button" class="link-btn" data-act="all">Select all</button><button type="button" class="link-btn" data-act="none">Clear</button></div>
+    </div>`;
+  const btn = host.querySelector('.ms-btn'), pop = host.querySelector('.ms-pop');
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    document.querySelectorAll('.ms-pop').forEach(p => { if (p !== pop) { p.hidden = true; p.previousElementSibling.setAttribute('aria-expanded', 'false'); } });
+    pop.hidden = !pop.hidden; btn.setAttribute('aria-expanded', String(!pop.hidden));
+    if (!pop.hidden) pop.querySelector('input')?.focus();
+  });
+  pop.addEventListener('click', e => e.stopPropagation());
+  pop.addEventListener('change', e => {
+    const o = options[+e.target.dataset.i];
+    e.target.checked ? selected.add(o.value) : selected.delete(o.value);
+    onChange(+e.target.dataset.i);
+  });
+  pop.addEventListener('click', e => {
+    const act = e.target.dataset?.act;
+    if (!act) return;
+    options.forEach(o => act === 'all' ? selected.add(o.value) : selected.delete(o.value));
+    onChange(null);
+  });
+  pop.addEventListener('keydown', e => { if (e.key === 'Escape') { pop.hidden = true; btn.setAttribute('aria-expanded', 'false'); btn.focus(); } });
+}
+document.addEventListener('click', () => document.querySelectorAll('.ms-pop').forEach(p => {
+  p.hidden = true; p.previousElementSibling?.setAttribute('aria-expanded', 'false');
+}));
+
+function renderFilters() {
+  const items = state.data.items;
+  const locs = [...new Set(items.map(i => i.location))].sort().map(l => ({ value: l, label: l }));
+  const pris = [...new Set(items.map(i => i.priority))].sort((a, b) => b - a)
+    .map(p => ({ value: p, label: p === 5 ? '5 (highest)' : p === 1 ? '1 (lowest)' : String(p) }));
+  const keepFocus = (host, i) => { render(); if (i != null) host.querySelector(`input[data-i="${i}"]`)?.focus(); };
+  multiSelect($('#msLoc'), 'Location', locs, state.sel.loc, i => keepFocus($('#msLoc'), i));
+  multiSelect($('#msPri'), 'Priority', pris, state.sel.pri, i => keepFocus($('#msPri'), i));
+
+  // confidence chips show unique deal-link counts for the current location/priority/window
+  const wids = new Set(visibleItems().map(i => i.wid));
+  const all = uniqueDeals(wids, false);
+  const counts = { High: 0, Medium: 0, Low: 0 };
+  all.forEach(d => { counts[d.conf] = (counts[d.conf] || 0) + 1; });
+  $('#confChips').innerHTML = ['High', 'Medium', 'Low'].map(c => `
+    <button type="button" class="chip" data-conf="${c}" aria-pressed="${state.sel.conf.has(c)}"
+      aria-label="${c} confidence, ${counts[c]} unique deal links">
+      <span class="dot ${c.toLowerCase()}"></span>${c} <b>${counts[c]}</b></button>`).join('');
+}
+
+/* ============================================================================
+   Chart (hand-drawn SVG)
+   ========================================================================== */
+function niceTicks(min, max, count = 4) {
+  const span = max - min || Math.abs(max) || 1;
+  const step0 = span / count, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= count) || 10 * mag;
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, out = [];
+  for (let v = lo; v <= hi + step / 2; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+
+function renderChart(host, { points, avg30, target, label }) {
+  if (points.length < 2) {
+    const msg = points.length === 1
+      ? `Only one tracked run in the last ${state.windowDays} days (${money(points[0].v)} on ${shortDate(new Date(points[0].t))}). The line appears after the next run.`
+      : `No average price recorded in the last ${state.windowDays} days. The tracker stores an average once a run finds at least 3 matching listings${state.windowDays === 30 ? ', so try the 90-day view' : ''}.`;
+    host.innerHTML = `<div class="empty"><p>${esc(msg)}</p></div>`;
+    return;
+  }
+  const W = Math.max(320, Math.round(host.clientWidth || 820)), narrow = W < 560;
+  const H = narrow ? 250 : 330, L = narrow ? 46 : 58, R = narrow ? 92 : 128, T = 18, B = 34;
+  const now = Date.now(), x0 = now - state.windowDays * DAY;
+  const vals = points.map(p => p.v).concat([avg30, target].filter(v => v != null));
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo) * 0.18 || hi * 0.1 || 1; lo = Math.max(0, lo - pad); hi += pad;
+  const ticks = niceTicks(lo, hi); lo = ticks[0]; hi = ticks[ticks.length - 1];
+  const X = t => L + (t - x0) / (now - x0) * (W - L - R);
+  const Y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+
+  const line = points.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
+  const area = `${line}L${X(points[points.length - 1].t).toFixed(1)},${H - B}L${X(points[0].t).toFixed(1)},${H - B}Z`;
+  const xt = [];
+  const nX = narrow ? 2 : 4;
+  for (let i = 0; i <= nX; i++) xt.push(x0 + (now - x0) * i / nX);
+
+  // right-side labels for the reference lines; nudge apart if they collide
+  const refs = [];
+  if (avg30 != null) refs.push({ y: Y(avg30), text: `${narrow ? '30d' : '30-day avg'} ${money(avg30)}`, cls: 'avg' });
+  if (target != null) refs.push({ y: Y(target), text: `Target ${money(target)}`, cls: 'tgt' });
+  if (refs.length === 2 && Math.abs(refs[0].y - refs[1].y) < 16) {
+    const [a, b] = refs[0].y <= refs[1].y ? refs : [refs[1], refs[0]];
+    const mid = (a.y + b.y) / 2; a.ly = mid - 9; b.ly = mid + 9;
+  }
+
+  const shade30 = state.windowDays > 30
+    ? `<rect x="${X(now - 30 * DAY).toFixed(1)}" y="${T}" width="${(X(now) - X(now - 30 * DAY)).toFixed(1)}" height="${H - T - B}" fill="rgba(212,107,85,.05)"/>
+       <text x="${(X(now - 30 * DAY) + 8).toFixed(1)}" y="${T + 14}" fill="#71717A" font-size="11.5">Last 30 days</text>` : '';
+
+  host.innerHTML = `
+  <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
+    <defs>
+      <linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FAFAFA" stop-opacity=".09"/><stop offset="1" stop-color="#FAFAFA" stop-opacity="0"/></linearGradient>
+      <filter id="glow" x="-10%" y="-200%" width="120%" height="500%"><feGaussianBlur stdDeviation="4"/></filter>
+    </defs>
+    ${shade30}
+    ${ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.06)"/>
+      <text x="${L - 12}" y="${Y(v) + 4}" text-anchor="end" fill="#A1A1AA" font-size="12">${money(v).replace(/\.00$/, '')}</text>`).join('')}
+    ${xt.map((t, i) => `<text x="${X(t)}" y="${H - 10}" text-anchor="${i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle'}" fill="#A1A1AA" font-size="12">${shortDate(new Date(t))}</text>`).join('')}
+    <path d="${area}" fill="url(#area)"/>
+    ${target != null ? `<line x1="${L}" x2="${W - R}" y1="${Y(target)}" y2="${Y(target)}" stroke="rgba(255,255,255,.35)" stroke-dasharray="5 5"/>` : ''}
+    ${avg30 != null ? `
+      <line x1="${L}" x2="${W - R}" y1="${Y(avg30)}" y2="${Y(avg30)}" stroke="#D46B55" stroke-width="5" opacity=".55" filter="url(#glow)"/>
+      <line x1="${L}" x2="${W - R}" y1="${Y(avg30)}" y2="${Y(avg30)}" stroke="#D46B55" stroke-width="2"/>` : ''}
+    ${refs.map(r => `<text x="${W - R + 10}" y="${((r.ly ?? r.y) + 4).toFixed(1)}" fill="${r.cls === 'avg' ? '#FAFAFA' : '#A1A1AA'}" font-size="12.5" font-weight="${r.cls === 'avg' ? 600 : 400}">${esc(r.text)}</text>`).join('')}
+    <path d="${line}" fill="none" stroke="#FAFAFA" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    ${points.map(p => `<circle cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="3" fill="#0A0A0F" stroke="#FAFAFA" stroke-width="1.6"/>`).join('')}
+    <line id="xhair" y1="${T}" y2="${H - B}" stroke="rgba(255,255,255,.18)" opacity="0"/>
+    <circle id="xdot" r="5" fill="#FAFAFA" opacity="0"/>
+    <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" id="hit"/>
+  </svg>
+  <div class="tip" id="tip"></div>`;
+
+  const svg = host.querySelector('svg'), tip = host.querySelector('#tip');
+  const xh = svg.querySelector('#xhair'), xd = svg.querySelector('#xdot');
+  const move = e => {
+    const box = svg.getBoundingClientRect(), sx = (e.clientX - box.left) / box.width * W;
+    const t = x0 + (sx - L) / (W - L - R) * (now - x0);
+    const p = points.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+    const px = X(p.t), py = Y(p.v);
+    xh.setAttribute('x1', px); xh.setAttribute('x2', px); xh.setAttribute('opacity', 1);
+    xd.setAttribute('cx', px); xd.setAttribute('cy', py); xd.setAttribute('opacity', 1);
+    tip.innerHTML = `<strong>${money(p.v)}</strong><span>${new Date(p.t).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</span>`;
+    tip.style.left = `${px / W * 100}%`; tip.style.top = `${py / H * box.height}px`; tip.style.opacity = 1;
+  };
+  svg.querySelector('#hit').addEventListener('pointermove', move);
+  svg.addEventListener('pointerleave', () => { tip.style.opacity = 0; xh.setAttribute('opacity', 0); xd.setAttribute('opacity', 0); });
+}
+
+/* ============================================================================
+   Main render
+   ========================================================================== */
+function render() {
+  if (!state.data) return;
+  const { items } = state.data;
+  // status line
+  const when = state.updatedAt ? `, workbook updated ${ago(state.updatedAt)}` : '';
+  $('#status').innerHTML = state.source === 'github'
+    ? `Live from <strong>${esc(state.sourceLabel)}</strong>${esc(when)}`
+    : `Loaded from <strong>${esc(state.sourceLabel)}</strong> on this computer${esc(when)}`;
+
+  renderFilters();
+  document.querySelectorAll('#winSeg button').forEach(b => b.setAttribute('aria-checked', String(+b.dataset.days === state.windowDays)));
+
+  const vis = visibleItems();
+  if (!vis.some(i => i.wid === state.focus)) {
+    // default focus: highest-priority visible item that has data
+    const ranked = [...vis].sort((a, b) => b.priority - a.priority);
+    state.focus = (ranked.find(i => stats(i, 'new').points.length) || ranked[0] || {}).wid ?? null;
+  }
+  renderFocus(vis);
+  renderSummary(vis);
+}
+
+function renderFocus(vis) {
+  const main = $('#focusMain'), pane = $('#dealsPane');
+  const item = vis.find(i => i.wid === state.focus);
+  if (!item) {
+    main.innerHTML = `<div class="empty"><p>No products match these filters. Widen the Location or Priority selection to see prices.</p></div>`;
+    pane.innerHTML = '';
+    return;
+  }
+  if (state.pool === 'resale' && !item.openUsed && !state.data.runs.some(r => r.wid === item.wid && r.avgRes != null)) state.pool = 'new';
+  const s = stats(item, state.pool);
+  const delta = (s.latest != null && s.avg30) ? (s.latest - s.avg30) / s.avg30 : null;
+  const resaleOk = item.openUsed || state.data.runs.some(r => r.wid === item.wid && r.avgRes != null);
+
+  main.innerHTML = `
+    <div class="focus-head">
+      <div>
+        <label class="sr-only" for="prodPick">Product</label>
+        <div class="picker">
+          <select id="prodPick">${vis.map(i => `<option value="${esc(i.wid)}" ${i.wid === item.wid ? 'selected' : ''}>${esc(i.product)}</option>`).join('')}</select>
+          ${CHEVRON}
+        </div>
+        <div class="meta">
+          <span class="tag">${esc(item.location)}</span>
+          <span class="tag">Priority ${item.priority}</span>
+          <span class="tag">Target ${money(item.target)}</span>
+          ${item.openUsed ? '<span class="tag">Open to used</span>' : ''}
+          ${s.lastChecked ? `<span class="tag">Checked ${esc(ago(s.lastChecked))}</span>` : '<span class="tag warn">Not checked yet</span>'}
+        </div>
+      </div>
+      <div class="figure">
+        <div class="big">${money(s.latest)}</div>
+        <div class="sub">${s.latest == null ? `Latest average (${state.pool})`
+          : delta == null ? `Latest average, ${state.pool} listings`
+          : `<span class="${delta < 0 ? 'down' : ''}">${delta < 0 ? '' : '+'}${(delta * 100).toFixed(1)}%</span> vs 30-day average`}</div>
+      </div>
+    </div>
+    <div class="chart-tools">
+      <div class="legend" aria-hidden="true">
+        <span><i></i>Average price per run</span><span><i class="avg"></i>30-day average</span>${item.target != null ? '<span><i class="tgt"></i>Target</span>' : ''}
+      </div>
+      <div class="seg" role="radiogroup" aria-label="Price pool" id="poolSeg">
+        <button type="button" role="radio" data-pool="new" aria-checked="${state.pool === 'new'}">New</button>
+        <button type="button" role="radio" data-pool="resale" aria-checked="${state.pool === 'resale'}" ${resaleOk ? '' : 'disabled title="This product is not open to used or refurbished"'}>Used / resale</button>
+      </div>
+    </div>
+    <div class="chart" id="chart"></div>`;
+
+  renderChart($('#chart'), {
+    points: s.points, avg30: s.avg30, target: item.target,
+    label: `${item.product}: ${state.pool} average price over the last ${state.windowDays} days, ${s.points.length} runs, 30-day average ${money(s.avg30)}`,
+  });
+  $('#prodPick').addEventListener('change', e => { state.focus = e.target.value; render(); $('#prodPick').focus(); });
+  $('#poolSeg').addEventListener('click', e => {
+    const p = e.target.closest('button')?.dataset.pool;
+    if (p && !e.target.disabled) { state.pool = p; render(); $(`#poolSeg [data-pool="${p}"]`)?.focus(); }
+  });
+
+  // deal links for this product
+  const deals = uniqueDeals(new Set([item.wid]));
+  const sel = ['High', 'Medium', 'Low'].filter(c => state.sel.conf.has(c));
+  const confNote = sel.length === 3 ? '' : sel.length ? `, ${sel.join(' and ').toLowerCase()} confidence only` : ', no confidence levels selected';
+  pane.innerHTML = `
+    <h2>Deal links</h2>
+    <p class="count">${deals.length} unique ${deals.length === 1 ? 'link' : 'links'}, last ${state.windowDays} days${confNote}</p>
+    ${deals.length ? deals.map(dealCard).join('') : `<div class="empty" style="min-height:160px"><p>No deals at the selected confidence levels in this window.</p></div>`}`;
+}
+
+function dealCard(d) {
+  const url = safeUrl(d.url);
+  const host = url ? new URL(url).hostname.replace(/^www\./, '') : '';
+  const linkText = /google\./.test(host) ? 'Compare on Google' : 'Open listing';
+  const rule = d.rule.replace(/>=/g, '\u2265').replace(/\s*\[(new|resale) pool\]/, (m, p1) => p1 === 'resale' ? ' among used listings' : '');
+  const each = d.packQty > 1 ? `<span class="badge">${d.packQty}-pack, ${money(d.listed)} total</span>` : '';
+  return `
+    <article class="deal">
+      <div class="deal-top"><span class="price">${money(d.price)}</span><span class="vendor" title="${esc(d.vendor)}">${esc(d.vendor || host)}</span></div>
+      ${d.title ? `<div class="title" title="${esc(d.title)}">${esc(d.title)}</div>` : ''}
+      <div class="row">
+        <span class="badge conf-${esc(d.conf)}"><span class="dot ${esc(d.conf.toLowerCase())}"></span>${esc(d.conf)}</span>
+        ${d.isPrimary ? '<span class="badge">Primary vendor</span>' : ''}
+        ${d.resale || (d.condition && d.condition !== 'new') ? `<span class="badge">${esc(d.condition || 'resale')}</span>` : ''}
+        ${each}
+        ${d.inStock === 'Yes' ? '<span class="badge">In stock</span>' : ''}
+        ${url ? `<a class="open" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${linkText}</a>` : ''}
+      </div>
+      <div class="why">${esc(rule ? `${rule}. ` : '')}Seen ${esc(ago(d.dt))}${d.comments ? `. ${esc(d.comments)}` : ''}</div>
+    </article>`;
+}
+
+function renderSummary(vis) {
+  const ws = state.windowDays;
+  $('#sumNote').textContent = `${vis.length} of ${state.data.items.length} products, new-condition averages, last ${ws} days`;
+  if (!vis.length) { $('#sumTable').innerHTML = '<tbody><tr><td class="soft">No products match these filters.</td></tr></tbody>'; return; }
+  const rows = [...vis].sort((a, b) => b.priority - a.priority || a.product.localeCompare(b.product)).map(i => {
+    const s = stats(i, 'new');
+    const deals = uniqueDeals(new Set([i.wid]));
+    const best = deals.length ? Math.min(...deals.map(d => d.price)) : null;
+    return `<tr class="${i.wid === state.focus ? 'active' : ''}">
+      <td><button class="prod-btn" type="button" data-wid="${esc(i.wid)}">${esc(i.product)}</button></td>
+      <td class="soft">${esc(i.location)}</td>
+      <td class="num">${i.priority}</td>
+      <td class="num">${money(i.target)}</td>
+      <td class="num">${money(s.latest)}</td>
+      <td class="num">${money(s.avg30)}</td>
+      <td class="num">${money(s.lowest)}</td>
+      <td class="num">${deals.length}${best != null ? ` <span class="muted">from ${money(best)}</span>` : ''}</td>
+      <td class="soft">${esc(ago(s.lastChecked))}</td>
+    </tr>`;
+  }).join('');
+  $('#sumTable').innerHTML = `
+    <thead><tr><th>Product</th><th>Location</th><th class="num">Priority</th><th class="num">Target</th>
+      <th class="num">Latest avg</th><th class="num">30-day avg</th><th class="num">Lowest seen</th><th class="num">Deal links</th><th>Last checked</th></tr></thead>
+    <tbody>${rows}</tbody>`;
+}
+
+/* ============================================================================
+   Wiring
+   ========================================================================== */
+$('#sumTable').addEventListener('click', e => {
+  const b = e.target.closest('.prod-btn');
+  if (!b) return;
+  state.focus = b.dataset.wid; render();
+  $('#focus').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+});
+$('#confChips').addEventListener('click', e => {
+  const c = e.target.closest('.chip')?.dataset.conf;
+  if (!c) return;
+  state.sel.conf.has(c) ? state.sel.conf.delete(c) : state.sel.conf.add(c);
+  render(); $(`#confChips [data-conf="${c}"]`)?.focus();
+});
+$('#winSeg').addEventListener('click', e => {
+  const d = +e.target.closest('button')?.dataset.days;
+  if (d) { state.windowDays = d; render(); $(`#winSeg [data-days="${d}"]`)?.focus(); }
+});
+$('#connectForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const cfg = readForm(), token = $('#fToken').value.trim() || state.token;
+  if (!token) { showAlert('Paste a GitHub token to connect, or open a local copy of the workbook.'); $('#fToken').focus(); return; }
+  const remember = $('#fRemember').checked;
+  savePrefs({ ...cfg, remember, token: remember ? token : undefined });
+  connect(cfg, token);
+});
+$('#fileInput').addEventListener('change', e => loadLocalFile(e.target.files[0]));
+$('#refreshBtn').addEventListener('click', () => { const p = loadPrefs(); connect({ ...DEFAULTS, ...p, ...readForm() }, state.token); });
+$('#connBtn').addEventListener('click', () => $('#connDialog').showModal());
+
+let dragDepth = 0;
+addEventListener('dragenter', e => { if ([...e.dataTransfer.types].includes('Files')) { dragDepth++; $('#drop').hidden = false; } });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#drop').hidden = true; } });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); dragDepth = 0; $('#drop').hidden = true; loadLocalFile(e.dataTransfer.files[0]); });
+
+let resizeTimer, lastW = innerWidth;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (Math.abs(innerWidth - lastW) > 40) { lastW = innerWidth; render(); } }, 150); });
+
+// Initial state: prefill the form; auto-connect if a token was remembered
+(function init() {
+  const p = { ...DEFAULTS, ...loadPrefs() };
+  $('#fOwner').value = p.owner; $('#fRepo').value = p.repo; $('#fBranch').value = p.branch; $('#fPath').value = p.path;
+  $('#fRemember').checked = !!p.remember;
+  if (!('DecompressionStream' in window)) showAlert('This browser is too old to read .xlsx files. Use a current version of Chrome, Edge, Firefox or Safari.');
+  if (p.remember && p.token) connect(p, p.token);
+})();
+</script>
+</body>
+</html>
