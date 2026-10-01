@@ -1,0 +1,111 @@
+# =============================================================================
+# Price Tracker - runs price_tracker.py on a schedule (or by hand) and commits the
+# updated workbook back to the repo.
+#
+# Needs these repository secrets (Settings > Secrets and variables > Actions):
+#   SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+# Missing/invalid secrets never fail the run - that source is just logged as N/A.
+# =============================================================================
+name: Price Tracker
+
+on:
+  schedule:
+    # Days 1,4,7,...,31 of each month at 13:17 UTC (~9:17 AM US Eastern). GitHub cron is UTC-only.
+    # (Day-of-month steps restart each month, so you occasionally get a 1-2 day gap at month end.)
+    - cron: "17 13 */3 * *"
+
+    # EXAMPLE of a second, cheaper schedule for high-priority items only (uncomment to use).
+    # Scheduled runs take no inputs, so use --min-priority in the run step for this schedule:
+    # - cron: "17 13 * * 1,4"
+
+  workflow_dispatch:                 # "Run workflow" button in the Actions tab
+    inputs:
+      min_priority:
+        description: "Only items with Priority >= this number (1-5)"
+        required: false
+        default: "1"
+        type: string
+      locations:
+        description: "Only these Locations, ';' separated, e.g. Master Bedroom; Overall (blank = all)"
+        required: false
+        default: ""
+        type: string
+      items:
+        description: "Only these WishlistItem ids, comma separated, e.g. 1,3 (blank = all)"
+        required: false
+        default: ""
+        type: string
+      force:
+        description: "Ignore the per-priority cadence (check items even if checked recently)"
+        type: boolean
+        default: true
+      dry_run:
+        description: "Dry run: search and log, but do NOT write or commit the workbook"
+        type: boolean
+        default: false
+
+# The job must be allowed to push the updated workbook back to the repo.
+permissions:
+  contents: write
+
+# Never run two copies at once (two runs editing the same .xlsx would conflict).
+concurrency:
+  group: price-tracker
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run price tracker
+        env:
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+          # Manual-run inputs are passed via env vars (not pasted into the script) to avoid shell injection.
+          # On scheduled runs these are all empty, so the script's defaults apply.
+          IN_MIN_PRIORITY: ${{ inputs.min_priority }}
+          IN_LOCATIONS: ${{ inputs.locations }}
+          IN_ITEMS: ${{ inputs.items }}
+          IN_FORCE: ${{ inputs.force }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=()
+          if [ -n "$IN_MIN_PRIORITY" ]; then ARGS+=(--min-priority "$IN_MIN_PRIORITY"); fi
+          if [ -n "$IN_LOCATIONS" ];    then ARGS+=(--locations "$IN_LOCATIONS"); fi
+          if [ -n "$IN_ITEMS" ];        then ARGS+=(--items "$IN_ITEMS"); fi
+          if [ "$IN_FORCE" = "true" ];  then ARGS+=(--force); fi
+          if [ "$IN_DRY_RUN" = "true" ]; then ARGS+=(--dry-run); fi
+          # To run only high-priority items on a schedule, add:  ARGS+=(--min-priority 4)
+          python price_tracker.py "${ARGS[@]}"
+
+      - name: Commit and push updated workbook
+        if: ${{ inputs.dry_run != true }}
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "*.xlsx"
+          if git diff --cached --quiet; then
+            echo "No workbook changes to commit."
+            exit 0
+          fi
+          git commit -m "Price tracker: update run data ($(date -u +%Y-%m-%d))"
+          # Pull first in case you edited the repo while the job was running.
+          git pull --rebase origin "$BRANCH"
+          git push origin "HEAD:$BRANCH"
