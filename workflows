@@ -2,9 +2,12 @@
 # Price Tracker - runs price_tracker.py on a schedule (or by hand) and commits the
 # updated workbook back to the repo.
 #
-# Needs these repository secrets (Settings > Secrets and variables > Actions):
-#   SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET  (+ optional BESTBUY_API_KEY)
-# Missing/invalid secrets never fail the run - that source is just logged as N/A.
+# NOTE: GitHub only runs workflow files stored at .github/workflows/<name>.yml. This copy lives at the
+# repo root, so it is inactive until you move it there.
+#
+# Optional repository secrets (Settings > Secrets and variables > Actions):
+#   BESTBUY_API_KEY (free), SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+# Missing/invalid secrets never fail the run - that source is logged as api_unavailable.
 # =============================================================================
 name: Price Tracker
 
@@ -56,7 +59,7 @@ concurrency:
 jobs:
   track:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out repo
@@ -71,12 +74,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Optional last-resort renderer for JavaScript-only product pages (free; ~1 min). Remove to skip.
+      - name: Install Playwright Chromium
+        continue-on-error: true
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
       - name: Run price tracker
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
           BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}   # optional: most reliable Best Buy prices
+          # Re-running this workflow run replaces its own rows instead of duplicating them (idempotent).
+          PRICE_TRACKER_RUN_ID: gh-${{ github.run_id }}
           # Manual-run inputs are passed via env vars (not pasted into the script) to avoid shell injection.
           # On scheduled runs these are all empty, so the script's defaults apply.
           IN_MIN_PRIORITY: ${{ inputs.min_priority }}
@@ -102,8 +114,9 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- "*.xlsx"
+          if [ -d tracker_state ]; then git add -- tracker_state; fi
           if git diff --cached --quiet; then
-            echo "No workbook changes to commit."
+            echo "No workbook/state changes to commit."
             exit 0
           fi
           git commit -m "Price tracker: update run data ($(date -u +%Y-%m-%d))"

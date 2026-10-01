@@ -1,3 +1,6 @@
 requests>=2.31
 openpyxl>=3.1
-curl_cffi>=0.7
+curl_cffi>=0.7          # optional at runtime: real-Chrome TLS fingerprint for bot-protected retailers
+# Optional last-resort renderer for JavaScript-only product pages (free, open source):
+#   pip install playwright && python -m playwright install chromium
+# The tracker runs normally without it (pages that need it are reported as parser_failure).

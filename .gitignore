@@ -10,3 +10,6 @@ venv/
 # Excel lock files and the script's temporary save file
 ~$*.xlsx
 *.xlsx.tmp
+
+# Tracker temp files (tracker_state/ itself IS committed - it carries learned identifiers + history)
+tracker_state/*.tmp

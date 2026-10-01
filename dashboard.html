@@ -166,13 +166,26 @@ h1{font-family:var(--display);font-weight:600;font-size:clamp(30px,3.4vw,44px);l
 .deal a.open{margin-left:auto;font-size:13px;font-weight:500;text-decoration:none;color:var(--fg);border-bottom:1px solid rgba(212,107,85,.6);padding-bottom:1px}
 .deal a.open:hover{border-color:var(--accent)}
 .deal .why{color:var(--fg-muted);font-size:12px;margin-top:6px}
+.badge.ev-verified{color:var(--fg);border-color:rgba(250,250,250,.22)}
+.badge.ev-snapshot{border-style:dashed}
+.badge.ev-drop{color:var(--fg);border-color:rgba(212,107,85,.55)}
+.badge.ev-cond{border-color:rgba(212,107,85,.35);border-style:dashed}
+
+/* ---------- Facts row under the chart ---------- */
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:14px}
+.fact{padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-md);background:rgba(255,255,255,.015);min-width:0}
+.fact .k{font-size:12px;color:var(--fg-muted)}
+.fact .v{font-family:var(--display);font-size:17px;font-weight:600;margin-top:2px}
+.fact .d{font-size:12px;color:var(--fg-soft);margin-top:2px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+.fact.wide{grid-column:1 / -1}
+.legend i.ref{border-top:2px dotted rgba(250,250,250,.6)}
 
 /* ---------- Summary table ---------- */
 .summary{padding:24px 0 8px}
 .summary-head{display:flex;justify-content:space-between;align-items:baseline;padding:0 24px 14px}
 .summary-head p{margin:0;color:var(--fg-soft);font-size:13.5px}
 .table-wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:14px;min-width:860px}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:1040px}
 th{text-align:left;font-weight:500;color:var(--fg-muted);font-size:13px;padding:10px 16px;border-bottom:1px solid var(--border);white-space:nowrap}
 td{padding:14px 16px;border-bottom:1px solid var(--border);white-space:nowrap}
 th.num,td.num{text-align:right}
@@ -272,6 +285,10 @@ dialog .connect{margin:0}
       <div class="chips" role="group" aria-label="Deal confidence">
         <span class="cap">Deal confidence</span>
         <span id="confChips"></span>
+      </div>
+      <div class="chips" role="group" aria-label="Price evidence">
+        <span class="cap">Evidence</span>
+        <span id="evChips"></span>
       </div>
       <span class="spacer"></span>
       <div class="seg" role="radiogroup" aria-label="Time window" id="winSeg">
@@ -473,6 +490,15 @@ async function buildModel(buffer) {
     wid: wid(pick(o, 'WishlistItem')), listings: num(pick(o, 'Listings Searched')),
     avgNew: num(pick(o, 'Avg Price (New)')), avgRes: num(pick(o, 'Avg Price (Resale)')),
     lowest: num(pick(o, 'Lowest Price Found')), notes: String(pick(o, 'Source Notes') ?? ''),
+    // verified-only fields (price_tracker.py v2); older rows simply leave them empty
+    baselineSrc: String(pick(o, 'Baseline Source') ?? ''),
+    verified: /^verified/i.test(String(pick(o, 'Baseline Source') ?? '')) ? num(pick(o, 'Vendor Baseline (New)')) : null,
+    median30: num(pick(o, '30d Trend (New)')), ref: num(pick(o, 'Reference Price')), refType: String(pick(o, 'Reference Type') ?? ''),
+    prior: num(pick(o, 'Prior Verified Price')), change: num(pick(o, 'Change vs Prior')),
+    vlow: num(pick(o, 'Verified Low')), ewma: num(pick(o, 'EWMA (Verified)')),
+    plan: String(pick(o, 'Best Qty Plan') ?? ''), planTotal: num(pick(o, 'Best Qty Total')), qtyNeeded: num(pick(o, 'Qty Needed')),
+    identity: String(pick(o, 'Product Identity') ?? ''), evidenceMix: String(pick(o, 'Evidence Mix') ?? ''),
+    outcomes: String(pick(o, 'Retrieval Outcomes') ?? ''), urlStatus: String(pick(o, 'Product URL Status') ?? ''),
   })).filter(r => r.dt);
   const runDates = new Map(runs.map(r => [r.runId, r.dt]));
 
@@ -487,6 +513,11 @@ async function buildModel(buffer) {
       listed: num(pick(o, 'Listed Price')), rule: String(pick(o, 'Deal Rule') ?? ''),
       resale: yes(pick(o, 'Secondary Vendor?')), comments: String(pick(o, 'Secondary Vendor Comments') ?? ''),
       inStock: String(pick(o, 'In Stock Verified') ?? ''), title: String(pick(o, 'Listing Title') ?? ''),
+      evidence: String(pick(o, 'Evidence') ?? ''), matchEv: String(pick(o, 'Match Evidence') ?? ''),
+      refPrice: num(pick(o, 'Baseline Price')), refType: String(pick(o, 'Reference Type') ?? ''),
+      regular: num(pick(o, 'Regular Price')), shipping: num(pick(o, 'Shipping')),
+      conditional: String(pick(o, 'Conditional Pricing') ?? ''), corroborated: String(pick(o, 'Corroborated By') ?? ''),
+      event: String(pick(o, 'Price Event') ?? ''),
     };
   }).filter(d => d.dt && d.url);
   return { items, runs, deals };
@@ -497,7 +528,7 @@ async function buildModel(buffer) {
    ========================================================================== */
 const state = {
   data: null, source: null, sourceLabel: '', updatedAt: null,
-  sel: { loc: new Set(), pri: new Set(), conf: new Set(['High', 'Medium', 'Low']) },
+  sel: { loc: new Set(), pri: new Set(), conf: new Set(['High', 'Medium', 'Low']), ev: new Set(['verified', 'snapshot', 'legacy']) },
   windowDays: 30, pool: 'new', focus: null, token: null,
 };
 
@@ -615,22 +646,39 @@ function uniqueDeals(wids, applyConf = true) {
     if (!prev || d.dt > prev.dt) latest.set(d.url, d);
   }
   let out = [...latest.values()];
-  if (applyConf) out = out.filter(d => state.sel.conf.has(d.conf));
-  return out.sort((a, b) => (b.isPrimary && !b.resale) - (a.isPrimary && !a.resale) || a.price - b.price);
+  if (applyConf) out = out.filter(d => state.sel.conf.has(d.conf) && state.sel.ev.has(evClass(d)));
+  return out.sort((a, b) => (evClass(a) === 'verified' ? 0 : 1) - (evClass(b) === 'verified' ? 0 : 1)
+    || (b.isPrimary && !b.resale) - (a.isPrimary && !a.resale) || a.price - b.price);
+}
+
+/** 'verified' (merchant page / official API), 'snapshot' (Google Shopping etc.) or 'legacy' (pre-v2 rows). */
+function evClass(d) {
+  if (/^verified/.test(d.evidence)) return 'verified';
+  if (d.evidence) return 'snapshot';
+  return 'legacy';
 }
 
 function stats(item, pool) {
-  const key = pool === 'resale' ? 'avgRes' : 'avgNew';
   const runs = state.data.runs.filter(r => r.wid === item.wid).sort((a, b) => a.dt - b.dt);
   const start = windowStart(), start30 = Date.now() - 30 * DAY;
-  const points = runs.filter(r => r.dt.getTime() >= start && r[key] != null).map(r => ({ t: r.dt.getTime(), v: r[key] }));
-  const avg30 = mean(runs.filter(r => r.dt.getTime() >= start30 && r[key] != null).map(r => r[key]));
-  const lows = runs.filter(r => r.dt.getTime() >= start && r.lowest != null).map(r => r.lowest);
+  // New pool: plot the VERIFIED price (merchant pages / official APIs) when the tracker recorded one;
+  // older runs and unverified items fall back to the market average, labelled as such.
+  const inWin = runs.filter(r => r.dt.getTime() >= start);
+  const hasVerified = pool !== 'resale' && runs.some(r => r.verified != null);
+  const key = pool === 'resale' ? 'avgRes' : hasVerified ? 'verified' : 'avgNew';
+  const points = inWin.filter(r => r[key] != null).map(r => ({ t: r.dt.getTime(), v: r[key] }));
+  const last = runs.length ? runs[runs.length - 1] : null;
+  const v2 = last && (last.evidenceMix || last.outcomes);       // row written by the verified-history tracker
+  const med = pool !== 'resale' && v2 && last.median30 != null ? last.median30 : null;
+  const avg30 = med ?? mean(runs.filter(r => r.dt.getTime() >= start30 && r[key] != null).map(r => r[key]));
+  const lows = inWin.filter(r => r.lowest != null).map(r => r.lowest);
   return {
-    points, avg30, latest: points.length ? points[points.length - 1].v : null,
+    points, avg30, avgKind: med != null ? 'median' : 'mean', seriesKind: key,
+    latest: points.length ? points[points.length - 1].v : null,
     lowest: lows.length ? Math.min(...lows) : null,
-    lastChecked: runs.length ? runs[runs.length - 1].dt : null,
-    runsInWindow: runs.filter(r => r.dt.getTime() >= start).length,
+    lastChecked: last ? last.dt : null, last,
+    ref: last ? last.ref : null, vlow: last ? last.vlow : null,
+    runsInWindow: inWin.length,
   };
 }
 
@@ -694,6 +742,13 @@ function renderFilters() {
     <button type="button" class="chip" data-conf="${c}" aria-pressed="${state.sel.conf.has(c)}"
       aria-label="${c} confidence, ${counts[c]} unique deal links">
       <span class="dot ${c.toLowerCase()}"></span>${c} <b>${counts[c]}</b></button>`).join('');
+  const evCounts = { verified: 0, snapshot: 0, legacy: 0 };
+  all.forEach(d => { evCounts[evClass(d)]++; });
+  const evLabel = { verified: 'Verified', snapshot: 'Snapshot', legacy: 'Older runs' };
+  $('#evChips').innerHTML = ['verified', 'snapshot', 'legacy'].filter(e => e !== 'legacy' || evCounts.legacy).map(e => `
+    <button type="button" class="chip" data-ev="${e}" aria-pressed="${state.sel.ev.has(e)}"
+      title="${e === 'verified' ? 'Price read from the merchant page or official API' : e === 'snapshot' ? 'Aggregator row (Google Shopping) - confirm on the merchant page' : 'Rows written before evidence tracking'}"
+      aria-label="${evLabel[e]} evidence, ${evCounts[e]} unique deal links">${evLabel[e]} <b>${evCounts[e]}</b></button>`).join('');
 }
 
 /* ============================================================================
@@ -708,18 +763,18 @@ function niceTicks(min, max, count = 4) {
   return out;
 }
 
-function renderChart(host, { points, avg30, target, label }) {
+function renderChart(host, { points, avg30, target, label, ref, avgLabel }) {
   if (points.length < 2) {
     const msg = points.length === 1
       ? `Only one tracked run in the last ${state.windowDays} days (${money(points[0].v)} on ${shortDate(new Date(points[0].t))}). The line appears after the next run.`
-      : `No average price recorded in the last ${state.windowDays} days. The tracker stores an average once a run finds at least 3 matching listings${state.windowDays === 30 ? ', so try the 90-day view' : ''}.`;
+      : `No price recorded in the last ${state.windowDays} days. The tracker records a verified price once a merchant page or official API prices the product${state.windowDays === 30 ? '; try the 90-day view' : ''}.`;
     host.innerHTML = `<div class="empty"><p>${esc(msg)}</p></div>`;
     return;
   }
   const W = Math.max(320, Math.round(host.clientWidth || 820)), narrow = W < 560;
   const H = narrow ? 250 : 330, L = narrow ? 46 : 58, R = narrow ? 92 : 128, T = 18, B = 34;
   const now = Date.now(), x0 = now - state.windowDays * DAY;
-  const vals = points.map(p => p.v).concat([avg30, target].filter(v => v != null));
+  const vals = points.map(p => p.v).concat([avg30, target, ref].filter(v => v != null));
   let lo = Math.min(...vals), hi = Math.max(...vals);
   const pad = (hi - lo) * 0.18 || hi * 0.1 || 1; lo = Math.max(0, lo - pad); hi += pad;
   const ticks = niceTicks(lo, hi); lo = ticks[0]; hi = ticks[ticks.length - 1];
@@ -734,11 +789,13 @@ function renderChart(host, { points, avg30, target, label }) {
 
   // right-side labels for the reference lines; nudge apart if they collide
   const refs = [];
-  if (avg30 != null) refs.push({ y: Y(avg30), text: `${narrow ? '30d' : '30-day avg'} ${money(avg30)}`, cls: 'avg' });
+  if (avg30 != null) refs.push({ y: Y(avg30), text: `${narrow ? '30d' : (avgLabel || '30-day avg')} ${money(avg30)}`, cls: 'avg' });
   if (target != null) refs.push({ y: Y(target), text: `Target ${money(target)}`, cls: 'tgt' });
-  if (refs.length === 2 && Math.abs(refs[0].y - refs[1].y) < 16) {
-    const [a, b] = refs[0].y <= refs[1].y ? refs : [refs[1], refs[0]];
-    const mid = (a.y + b.y) / 2; a.ly = mid - 9; b.ly = mid + 9;
+  if (ref != null) refs.push({ y: Y(ref), text: `${narrow ? 'Ref' : 'Reference'} ${money(ref)}`, cls: 'ref' });
+  refs.sort((a, b) => a.y - b.y);                       // nudge labels apart when lines are close
+  for (let i = 1; i < refs.length; i++) {
+    const prev = refs[i - 1].ly ?? refs[i - 1].y;
+    if (refs[i].y - prev < 17) refs[i].ly = prev + 17;
   }
 
   const shade30 = state.windowDays > 30
@@ -757,6 +814,7 @@ function renderChart(host, { points, avg30, target, label }) {
     ${xt.map((t, i) => `<text x="${X(t)}" y="${H - 10}" text-anchor="${i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle'}" fill="#A1A1AA" font-size="12">${shortDate(new Date(t))}</text>`).join('')}
     <path d="${area}" fill="url(#area)"/>
     ${target != null ? `<line x1="${L}" x2="${W - R}" y1="${Y(target)}" y2="${Y(target)}" stroke="rgba(255,255,255,.35)" stroke-dasharray="5 5"/>` : ''}
+    ${ref != null ? `<line x1="${L}" x2="${W - R}" y1="${Y(ref)}" y2="${Y(ref)}" stroke="rgba(250,250,250,.6)" stroke-dasharray="1.5 4" stroke-linecap="round"/>` : ''}
     ${avg30 != null ? `
       <line x1="${L}" x2="${W - R}" y1="${Y(avg30)}" y2="${Y(avg30)}" stroke="#D46B55" stroke-width="5" opacity=".55" filter="url(#glow)"/>
       <line x1="${L}" x2="${W - R}" y1="${Y(avg30)}" y2="${Y(avg30)}" stroke="#D46B55" stroke-width="2"/>` : ''}
@@ -821,6 +879,8 @@ function renderFocus(vis) {
   if (state.pool === 'resale' && !item.openUsed && !state.data.runs.some(r => r.wid === item.wid && r.avgRes != null)) state.pool = 'new';
   const s = stats(item, state.pool);
   const delta = (s.latest != null && s.avg30) ? (s.latest - s.avg30) / s.avg30 : null;
+  const kindLabel = s.seriesKind === 'verified' ? 'verified price (merchant page / API)'
+    : s.seriesKind === 'avgRes' ? 'used / resale average' : 'market average (not verified)';
   const resaleOk = item.openUsed || state.data.runs.some(r => r.wid === item.wid && r.avgRes != null);
 
   main.innerHTML = `
@@ -836,30 +896,33 @@ function renderFocus(vis) {
           <span class="tag">Priority ${item.priority}</span>
           <span class="tag">Target ${money(item.target)}</span>
           ${item.openUsed ? '<span class="tag">Open to used</span>' : ''}
+          ${item.qty > 1 ? `<span class="tag">Need ${item.qty}</span>` : ''}
           ${s.lastChecked ? `<span class="tag">Checked ${esc(ago(s.lastChecked))}</span>` : '<span class="tag warn">Not checked yet</span>'}
         </div>
       </div>
       <div class="figure">
         <div class="big">${money(s.latest)}</div>
-        <div class="sub">${s.latest == null ? `Latest average (${state.pool})`
-          : delta == null ? `Latest average, ${state.pool} listings`
-          : `<span class="${delta < 0 ? 'down' : ''}">${delta < 0 ? '' : '+'}${(delta * 100).toFixed(1)}%</span> vs 30-day average`}</div>
+        <div class="sub">${s.latest == null ? `Latest ${kindLabel}`
+          : delta == null ? `Latest ${kindLabel}`
+          : `<span class="${delta < 0 ? 'down' : ''}">${delta < 0 ? '' : '+'}${(delta * 100).toFixed(1)}%</span> vs ${s.avgKind === 'median' ? '30-day verified median' : '30-day average'}`}</div>
       </div>
     </div>
     <div class="chart-tools">
       <div class="legend" aria-hidden="true">
-        <span><i></i>Average price per run</span><span><i class="avg"></i>30-day average</span>${item.target != null ? '<span><i class="tgt"></i>Target</span>' : ''}
+        <span><i></i>${s.seriesKind === 'verified' ? 'Verified price per run' : 'Average price per run'}</span><span><i class="avg"></i>${s.avgKind === 'median' ? '30-day verified median' : '30-day average'}</span>${state.pool !== 'resale' && s.ref != null ? '<span><i class="ref"></i>Reference</span>' : ''}${item.target != null ? '<span><i class="tgt"></i>Target</span>' : ''}
       </div>
       <div class="seg" role="radiogroup" aria-label="Price pool" id="poolSeg">
         <button type="button" role="radio" data-pool="new" aria-checked="${state.pool === 'new'}">New</button>
         <button type="button" role="radio" data-pool="resale" aria-checked="${state.pool === 'resale'}" ${resaleOk ? '' : 'disabled title="This product is not open to used or refurbished"'}>Used / resale</button>
       </div>
     </div>
-    <div class="chart" id="chart"></div>`;
+    <div class="chart" id="chart"></div>
+    ${factsHtml(item, s)}`;
 
   renderChart($('#chart'), {
-    points: s.points, avg30: s.avg30, target: item.target,
-    label: `${item.product}: ${state.pool} average price over the last ${state.windowDays} days, ${s.points.length} runs, 30-day average ${money(s.avg30)}`,
+    points: s.points, avg30: s.avg30, target: item.target, ref: state.pool !== 'resale' ? s.ref : null,
+    avgLabel: s.avgKind === 'median' ? '30d median' : '30-day avg',
+    label: `${item.product}: ${kindLabel} over the last ${state.windowDays} days, ${s.points.length} runs, 30-day ${s.avgKind} ${money(s.avg30)}`,
   });
   $('#prodPick').addEventListener('change', e => { state.focus = e.target.value; render(); $('#prodPick').focus(); });
   $('#poolSeg').addEventListener('click', e => {
@@ -870,11 +933,30 @@ function renderFocus(vis) {
   // deal links for this product
   const deals = uniqueDeals(new Set([item.wid]));
   const sel = ['High', 'Medium', 'Low'].filter(c => state.sel.conf.has(c));
-  const confNote = sel.length === 3 ? '' : sel.length ? `, ${sel.join(' and ').toLowerCase()} confidence only` : ', no confidence levels selected';
+  const confNote = (sel.length === 3 ? '' : sel.length ? `, ${sel.join(' and ').toLowerCase()} confidence only` : ', no confidence levels selected')
+    + (state.sel.ev.has('snapshot') ? '' : ', verified prices only');
   pane.innerHTML = `
     <h2>Deal links</h2>
     <p class="count">${deals.length} unique ${deals.length === 1 ? 'link' : 'links'}, last ${state.windowDays} days${confNote}</p>
     ${deals.length ? deals.map(dealCard).join('') : `<div class="empty" style="min-height:160px"><p>No deals at the selected confidence levels in this window.</p></div>`}`;
+}
+
+function factsHtml(item, s) {
+  const r = s.last;
+  if (!r || state.pool === 'resale') return '';
+  const refType = (r.refType || '').split(':');
+  const refKind = { msrp_regular: 'Regular / MSRP', regular_consensus: 'Regular-price consensus', historical_verified: 'Verified history',
+                    verified_current: 'Verified current price' }[refType[0]] || 'Reference';
+  const chg = r.change != null ? `${r.change < 0 ? '' : '+'}${(r.change * 100).toFixed(1)}% vs prior ${money(r.prior)}` : (r.prior != null ? `prior ${money(r.prior)}` : 'no prior verified run yet');
+  const facts = [
+    { k: 'Verified price (latest run)', v: money(r.verified), d: r.verified != null ? chg : (r.baselineSrc || 'no merchant page / API priced it') },
+    { k: refKind, v: money(r.ref), d: refType.slice(1).join(':').trim() || 'how "normal" is defined for deals' },
+    { k: 'Verified low', v: money(r.vlow), d: r.ewma != null ? `EWMA ${money(r.ewma)}` : 'from verified runs only' },
+    { k: `Cheapest way to buy ${r.qtyNeeded ?? item.qty ?? 1}`, v: money(r.planTotal), d: r.plan || 'no purchasable High-confidence offer' },
+  ];
+  const audit = [r.identity && `Identity: ${r.identity}`, r.evidenceMix && `Evidence: ${r.evidenceMix}`, r.outcomes && `Retrieval: ${r.outcomes}`].filter(Boolean);
+  return `<div class="facts">${facts.map(f => `<div class="fact"><div class="k">${esc(f.k)}</div><div class="v">${f.v}</div><div class="d" title="${esc(f.d)}">${esc(f.d)}</div></div>`).join('')}
+    ${audit.length ? `<div class="fact wide"><div class="k">Last run audit</div><div class="d" style="-webkit-line-clamp:4" title="${esc(audit.join('\n'))}">${esc(audit.join(' · '))}</div></div>` : ''}</div>`;
 }
 
 function dealCard(d) {
@@ -883,6 +965,18 @@ function dealCard(d) {
   const linkText = /google\./.test(host) ? 'Compare on Google' : 'Open listing';
   const rule = d.rule.replace(/>=/g, '\u2265').replace(/\s*\[(new|resale) pool\]/, (m, p1) => p1 === 'resale' ? ' among used listings' : '');
   const each = d.packQty > 1 ? `<span class="badge">${d.packQty}-pack, ${money(d.listed)} total</span>` : '';
+  const ev = evClass(d);
+  const evBadge = ev === 'verified'
+    ? `<span class="badge ev-verified" title="Price read from the merchant page or official API">${d.evidence === 'verified_direct' ? 'Verified' : 'Verified (discovered)'}</span>`
+    : ev === 'snapshot' ? '<span class="badge ev-snapshot" title="Aggregator row - confirm the price on the merchant page">Snapshot</span>' : '';
+  const evt = d.event || '';
+  const evtBadge = /drop/.test(evt) ? `<span class="badge ev-drop">${esc(evt.replace(/^price /, ''))}</span>`
+    : /^new offer/.test(evt) ? '<span class="badge">New</span>'
+    : /^unchanged/.test(evt) ? `<span class="badge" title="${esc(evt)}">Unchanged</span>` : '';
+  const cond = d.conditional ? `<span class="badge ev-cond" title="${esc(d.conditional)}">${esc(d.conditional.split(':')[0])} price</span>` : '';
+  const extra = [d.shipping != null ? (d.shipping === 0 ? 'free shipping' : `incl. ${money(d.shipping)} shipping`) : '',
+                 d.regular != null ? `regular ${money(d.regular)}` : '', d.corroborated ? `corroborated by ${d.corroborated}` : '']
+                .filter(Boolean).join('; ');
   return `
     <article class="deal">
       <div class="deal-top"><span class="price">${money(d.price)}</span><span class="vendor" title="${esc(d.vendor)}">${esc(d.vendor || host)}</span></div>
@@ -893,35 +987,40 @@ function dealCard(d) {
         ${d.resale || (d.condition && d.condition !== 'new') ? `<span class="badge">${esc(d.condition || 'resale')}</span>` : ''}
         ${each}
         ${d.inStock === 'Yes' ? '<span class="badge">In stock</span>' : ''}
+        ${evBadge}${evtBadge}${cond}
         ${url ? `<a class="open" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${linkText}</a>` : ''}
       </div>
-      <div class="why">${esc(rule ? `${rule}. ` : '')}Seen ${esc(ago(d.dt))}${d.comments ? `. ${esc(d.comments)}` : ''}</div>
+      <div class="why">${esc(rule ? `${rule.replace(/\s*\[market snapshot[^\]]*\]/, '')}. ` : '')}${extra ? esc(extra) + '. ' : ''}Seen ${esc(ago(d.dt))}${d.comments ? `. ${esc(d.comments)}` : ''}</div>
     </article>`;
 }
 
 function renderSummary(vis) {
   const ws = state.windowDays;
-  $('#sumNote').textContent = `${vis.length} of ${state.data.items.length} products, new-condition averages, last ${ws} days`;
+  $('#sumNote').textContent = `${vis.length} of ${state.data.items.length} products, verified new-condition prices where available, last ${ws} days`;
   if (!vis.length) { $('#sumTable').innerHTML = '<tbody><tr><td class="soft">No products match these filters.</td></tr></tbody>'; return; }
   const rows = [...vis].sort((a, b) => b.priority - a.priority || a.product.localeCompare(b.product)).map(i => {
     const s = stats(i, 'new');
     const deals = uniqueDeals(new Set([i.wid]));
     const best = deals.length ? Math.min(...deals.map(d => d.price)) : null;
+    const r = s.last || {};
+    const tag = s.seriesKind === 'verified' ? '' : ' <span class="muted" title="market average - no verified price yet">≈</span>';
     return `<tr class="${i.wid === state.focus ? 'active' : ''}">
       <td><button class="prod-btn" type="button" data-wid="${esc(i.wid)}">${esc(i.product)}</button></td>
       <td class="soft">${esc(i.location)}</td>
       <td class="num">${i.priority}</td>
       <td class="num">${money(i.target)}</td>
-      <td class="num">${money(s.latest)}</td>
+      <td class="num">${money(s.latest)}${s.latest != null ? tag : ''}</td>
+      <td class="num">${money(r.ref)}</td>
       <td class="num">${money(s.avg30)}</td>
-      <td class="num">${money(s.lowest)}</td>
+      <td class="num">${money(r.vlow ?? s.lowest)}</td>
+      <td class="num" title="${esc(r.plan || '')}">${r.planTotal != null ? `${money(r.planTotal)} <span class="muted">for ${r.qtyNeeded ?? i.qty ?? 1}</span>` : '–'}</td>
       <td class="num">${deals.length}${best != null ? ` <span class="muted">from ${money(best)}</span>` : ''}</td>
       <td class="soft">${esc(ago(s.lastChecked))}</td>
     </tr>`;
   }).join('');
   $('#sumTable').innerHTML = `
     <thead><tr><th>Product</th><th>Location</th><th class="num">Priority</th><th class="num">Target</th>
-      <th class="num">Latest avg</th><th class="num">30-day avg</th><th class="num">Lowest seen</th><th class="num">Deal links</th><th>Last checked</th></tr></thead>
+      <th class="num">Latest price</th><th class="num">Reference</th><th class="num">30-day median</th><th class="num">Verified low</th><th class="num">Best qty plan</th><th class="num">Deal links</th><th>Last checked</th></tr></thead>
     <tbody>${rows}</tbody>`;
 }
 
@@ -939,6 +1038,12 @@ $('#confChips').addEventListener('click', e => {
   if (!c) return;
   state.sel.conf.has(c) ? state.sel.conf.delete(c) : state.sel.conf.add(c);
   render(); $(`#confChips [data-conf="${c}"]`)?.focus();
+});
+$('#evChips').addEventListener('click', e => {
+  const v = e.target.closest('.chip')?.dataset.ev;
+  if (!v) return;
+  state.sel.ev.has(v) ? state.sel.ev.delete(v) : state.sel.ev.add(v);
+  render(); $(`#evChips [data-ev="${v}"]`)?.focus();
 });
 $('#winSeg').addEventListener('click', e => {
   const d = +e.target.closest('button')?.dataset.days;
