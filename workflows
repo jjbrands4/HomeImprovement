@@ -3,7 +3,7 @@
 # updated workbook back to the repo.
 #
 # Needs these repository secrets (Settings > Secrets and variables > Actions):
-#   SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+#   SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET  (+ optional BESTBUY_API_KEY)
 # Missing/invalid secrets never fail the run - that source is just logged as N/A.
 # =============================================================================
 name: Price Tracker
@@ -76,6 +76,7 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+          BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}   # optional: most reliable Best Buy prices
           # Manual-run inputs are passed via env vars (not pasted into the script) to avoid shell injection.
           # On scheduled runs these are all empty, so the script's defaults apply.
           IN_MIN_PRIORITY: ${{ inputs.min_priority }}

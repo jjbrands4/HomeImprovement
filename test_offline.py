@@ -27,6 +27,26 @@ SRC = next(iter(sorted(Path(".").glob(pt.WORKBOOK_GLOB))), None)
 if SRC is None:
     sys.exit("Put this file next to your workbook (Home Wishlist.xlsx) and re-run.")
 
+# Work on a FIXTURE copy so the tests don't depend on what's currently in your real Master Sheet:
+# item 4 (MiBoxer, priority 1) is added if missing; it is used for the cadence + matching tests.
+_fx_dir = Path(tempfile.mkdtemp())
+FIXTURE = _fx_dir / "Home Wishlist.xlsx"
+shutil.copy(SRC, FIXTURE)
+_fx = load_workbook(FIXTURE)
+_ms = _fx[pt.SHEET_MASTER]
+_hm = pt.header_map(_ms)
+if not any(str(_ms.cell(r, _hm["wishlistitem"]).value).strip() == "4" for r in range(2, _ms.max_row + 1)):
+    _r = _ms.max_row + 1
+    for k, v in {"wishlistitem": 4, "product": "MiBoxer 2.4 GHz WiFi Gateway", "location": "Overall",
+                 "priority1low5high": 1, "quantityneeded": 1, "targetpriceperitemusd": 25,
+                 "openusedorhighqualityrefurbished": "No", "openusedorhighqualityrefurbished?": "No",
+                 "isbulkoption": "No"}.items():
+        c = pt.find_col(_hm, k)
+        if c:
+            _ms.cell(_r, c, v)
+_fx.save(FIXTURE)
+SRC = FIXTURE
+
 passed = failed = 0
 
 
@@ -457,8 +477,10 @@ sonos_u.urls = ["https://www.bestbuy.com/site/sonos-ray/6505005.p", "https://www
 ctx_stub = type("C", (), {})()
 ctx_stub.primary = pt.load_primary_vendors(wb0[pt.SHEET_PRIMARY])
 ctx_stub.session = RSess([("bestbuy.com", page("Sonos Ray Soundbar", "169.99")), ("sonos.com/en-us/shop/ray", page("Sonos Ray", "179"))])
-ls, note, covered = pt.product_url_listings(sonos_u, ctx_stub)
+ls, status, covered, failed_u = pt.product_url_listings(sonos_u, ctx_stub)
+note = str(status)
 check("Product URLs: both pages priced", sorted(l.price for l in ls) == [169.99, 179.0], note)
+check("Product URLs: marked as from_url (ground truth)", all(l.from_url for l in ls) and not failed_u)
 check("Product URLs: Sonos page credited to 'Sonos Direct' vendor", any(l.vendor == "Sonos Direct" for l in ls))
 check("Product URLs: Best Buy page matches primary vendor 'Best Buy'",
       pt.keys_match(pt.vendor_key(next(l.vendor for l in ls if "bestbuy" in l.url)), pt.vendor_key("Best Buy")))
@@ -494,12 +516,131 @@ pt.main(["--workbook", str(tmp7), "--items", "2", "--force", "--no-ebay"])
 w7 = load_workbook(tmp7)[pt.SHEET_RUN]
 h7 = pt.header_map(w7)
 row7 = {k: w7.cell(2, c).value for k, c in h7.items()}
-check("ThirdReality-only run: Avg Price (New) recorded from 2 pack options ($13.50 & $12.50 each)",
-      row7["avgpricenew"] == 13.0, str(row7["avgpricenew"]))
-check("...with Avg Sample (New) = 2", row7["avgsamplenew"] == 2, str(row7["avgsamplenew"]))
-check("...Matching Listings = 2 (sold-out 1-pack excluded)", row7["matchinglistings"] == 2)
-check("...note explains why deal rules did not use it", "only 2 listing(s)" in (row7["sourcenotes"] or ""))
-check("...no deals claimed from a 2-listing sample", row7["dealsfound"] == 0)
+check("ThirdReality-only run: Avg Price (New) includes the sold-out vendor 1-pack list price",
+      row7["avgpricenew"] == 13.66, str(row7["avgpricenew"]))
+check("...with Avg Sample (New) = 3", row7["avgsamplenew"] == 3, str(row7["avgsamplenew"]))
+check("...vendor baseline = sold-out 1-pack list price $14.99", row7["vendorbaselinenew"] == 14.99, str(row7["vendorbaselinenew"]))
+check("...the vendor's normal 2/4-pack pricing is NOT a deal (compared per pack size)", row7["dealsfound"] == 0)
+
+# ---------------------------------------------------------------------------
+print("\n[8] Regressions from run 20261001-020327-5949 (Product URLs, baselines, false deals)")
+
+# --- 8a. page extractors: Dell-style microdata / embedded JSON, sold-out JSON-LD, retries, Best Buy API
+dell_html = '<html><title>Philips Hue Slim Downlight | Dell USA</title><div itemscope><span itemprop="price" content="64.99"></span></div></html>'
+check("Dell-style microdata price parsed", (pt.parse_microdata_price(dell_html) or {}).get("price") == 64.99)
+js_html = '<script>window.__STATE__={"product":{"name":"x","dellPrice":"$64.99","financing":"$6/mo"}}</script>'
+check("Embedded-JSON price parsed (JS-rendered page)", (pt.parse_embedded_price(js_html, 60) or {}).get("price") == 64.99)
+check("Embedded-JSON skips implausible prices (financing $6)",
+      pt.parse_embedded_price('{"salePrice": 6}', 60) is None)
+oos_ld = ('<script type="application/ld+json">{"@type":"Product","name":"Hue Slim downlight 4 inch",'
+          '"offers":{"price":"69.99","priceCurrency":"USD","availability":"https://schema.org/OutOfStock"}}</script>')
+info = pt.parse_jsonld_product(oos_ld)
+check("Sold-out Hue page still yields its price", info and info["price"] == 69.99 and info["in_stock"] is False, str(info))
+
+flaky = Sess(ConnectionError("reset"), ConnectionError("reset"), Resp(200, None, dell_html, "text/html"))
+r, why = pt.fetch_page("https://www.dell.com/x", flaky)
+check("fetch_page retries network errors (BestBuy-style) and recovers", r is not None and flaky.n == 3, why)
+dead = Sess(*[ConnectionError("reset")] * (pt.PAGE_RETRIES + 1))
+_cffi, pt.cffi_requests = pt.cffi_requests, None
+r, why = pt.fetch_page("https://www.bestbuy.com/x", dead)
+pt.cffi_requests = _cffi
+check("fetch_page gives a clear reason when every attempt fails", r is None and "network error" in why, why)
+check("Best Buy SKU parsed from old + new URL styles",
+      pt._bestbuy_sku("https://www.bestbuy.com/site/sonos-ray/6505005.p?skuId=6505005") == "6505005"
+      and pt._bestbuy_sku("https://www.bestbuy.com/product/sonos-ray/J3ZYG/sku/6505005") == "6505005")
+os.environ["BESTBUY_API_KEY"] = "k"
+bb = Sess(Resp(200, {"products": [{"sku": 6505005, "name": "Sonos - Ray Soundbar - Black", "salePrice": 219.0,
+                                   "onlineAvailability": True}]}))
+ls, why = pt.bestbuy_api_listing("https://www.bestbuy.com/site/sonos-ray/6505005.p", "Best Buy", bb)
+os.environ.pop("BESTBUY_API_KEY")
+check("Best Buy API path prices the page without scraping", ls and ls[0].price == 219.0 and ls[0].in_stock, why)
+
+# --- 8b. matching: Beam is not Ray; accessories 'for Sonos Ray' are not the Ray
+check("eBay 'Sonos Beam' does NOT match 'Sonos Ray' -> Low",
+      cc(sonos, "Sonos Beam (Gen 2) Smart Soundbar Black")[0] == "Low")
+check("'Wall Bracket compatible with Sonos Ray' -> Low",
+      cc(sonos, "Mounting Kit Compatible with Sonos Ray Soundbar")[0] == "Low")
+check("Genuine 'Sonos Ray Soundbar' still matches", cc(sonos, "Sonos Ray Compact Soundbar Black RAYG1US1BLK")[0] != "Low")
+
+# --- 8c. end-to-end replay of the bad run with fake sources
+FAKE_SERP["sonos"] = [
+    S("Sonos Ray Soundbar RAYG1US1BLK", 287.42, "Zaytoun"),                       # overpriced reseller
+    S("Sonos Ray Soundbar + Sub Mini Bundle", 699.00, "Amazon.com"),              # bundle: skews the avg
+    S("Sonos Ray Soundbar Black", 649.00, "Walmart - Seller"),                    # gouged marketplace
+    S("Sonos Ray Soundbar Black RAYG1US1BLK", 219.00, "Best Buy"),                # fills the failed BB URL
+    S("Sonos Ray Soundbar Black RAYG1US1BLK", 219.00, "Sonos"),                   # duplicate of sonos.com page
+    S("Sonos Ray Compact Soundbar RAYG1US1BLK", 179.00, "Target"),               # a real ~18% deal
+]
+FAKE_EBAY["sonos"] = [E("Sonos Beam (Gen 2) Soundbar Black", 199.99, "Used", 99.5, 900)]
+pt.SerpApiClient.shopping = fake_shopping
+pt.SerpApiClient.check_credits = lambda self: None
+pt.EbayClient.search = fake_ebay
+pt.direct_vendor_listings = lambda v, it, s: ([], f"Direct[{v.name}]: N/A (fake)")
+os.environ.update({"SERPAPI_KEY": "dummy", "EBAY_CLIENT_ID": "dummy", "EBAY_CLIENT_SECRET": "dummy"})
+
+hue_ld = oos_ld
+routes = {"philips-hue.com": Resp(200, None, hue_ld, "text/html"),
+          "dell.com": Resp(200, None, dell_html, "text/html"),
+          "sonos.com": page("Sonos Ray", "219.00")}
+
+
+class URLSess:
+    def get(self, url, **kw):
+        if "bestbuy.com" in url:
+            raise ConnectionError("reset by peer")
+        for k, v in routes.items():
+            if k in url:
+                return v
+        return Resp(404, None, "", "text/html")
+    post = get
+
+
+tmp8 = Path(tempfile.mkdtemp()) / "Home Wishlist.xlsx"
+shutil.copy(SRC, tmp8)
+w = load_workbook(tmp8)
+ms = w[pt.SHEET_MASTER]
+mh = pt.ensure_columns(ms, ["Product URLs"])
+for r in range(2, ms.max_row + 1):
+    wid = str(ms.cell(r, mh["wishlistitem"]).value)
+    ms.cell(r, mh["producturls"], {
+        "1": "https://www.philips-hue.com/en-us/p/hue-slim-downlight-4/046677\nhttps://www.dell.com/en-us/shop/hue/apd/ab1",
+        "3": "https://www.sonos.com/en-us/shop/ray; https://www.bestbuy.com/site/sonos-ray/6505005.p"}.get(wid))
+w.save(tmp8)
+_orig_session = pt.requests.Session
+pt.requests.Session = URLSess
+_cffi, pt.cffi_requests = pt.cffi_requests, None
+pt.main(["--workbook", str(tmp8), "--items", "1,3", "--force"])
+pt.requests.Session, pt.cffi_requests = _orig_session, _cffi
+
+w8 = load_workbook(tmp8)
+rw, dw = w8[pt.SHEET_RUN], w8[pt.SHEET_DEALS]
+rh8, dh8 = pt.header_map(rw), pt.header_map(dw)
+rr = {str(rw.cell(r, rh8["wishlistitem"]).value): {k: rw.cell(r, c).value for k, c in rh8.items()} for r in range(2, rw.max_row + 1)}
+dd = [{k: dw.cell(r, c).value for k, c in dh8.items()} for r in range(2, dw.max_row + 1)]
+h1, s3 = rr.get("1", {}), rr.get("3", {})
+print("     Hue :", h1.get("avgpricenew"), h1.get("vendorbaselinenew"), "|", h1.get("producturlstatus"))
+print("     Sonos:", s3.get("avgpricenew"), s3.get("vendorbaselinenew"), "|", s3.get("producturlstatus"))
+for d in dd:
+    print(f"     deal: item {d['wishlistitem']} ${d['price']} {d['vendor']} | {d['dealrule']} | "
+          f"%tgt={d['belowtarget']} %base={d['belowbaseline']}")
+check("Hue: Avg (New) recorded even though the Hue page is sold out", h1.get("avgpricenew") is not None, str(h1))
+check("Hue: vendor baseline from both Product URLs (69.99 sold-out + 64.99 Dell)",
+      h1.get("vendorbaselinenew") == 67.49, str(h1.get("vendorbaselinenew")))
+check("Hue: Product URL Status shows Dell priced + Hue OUT OF STOCK",
+      "dell.com: $64.99" in (h1.get("producturlstatus") or "") and "OUT OF STOCK" in (h1.get("producturlstatus") or ""))
+check("Sonos: vendor baseline = sonos.com $219", s3.get("vendorbaselinenew") == 219.0, str(s3.get("vendorbaselinenew")))
+check("Sonos: Best Buy URL network error filled from Best Buy's Google Shopping row",
+      "bestbuy.com: $219.00 via Google Shopping fallback" in (s3.get("producturlstatus") or ""), s3.get("producturlstatus"))
+check("Sonos: Avg (New) anchored near $219 (not ~$454)", s3.get("avgpricenew") and 170 <= s3["avgpricenew"] <= 260,
+      str(s3.get("avgpricenew")))
+sonos_deals = [d for d in dd if str(d["wishlistitem"]) == "3"]
+check("Sonos: Zaytoun $287.42 is NOT a deal", all(d["price"] != 287.42 for d in sonos_deals))
+check("Sonos: eBay 'Beam' $199.99 is NOT a deal", all(d["price"] != 199.99 for d in sonos_deals))
+check("Sonos: Target $179 IS a deal vs the $219 baseline, with correct % columns",
+      any(d["price"] == 179.0 and d["baselineprice"] == 219.0 and abs(d["belowbaseline"] - 0.1826) < 0.001
+          and abs(d["belowtarget"] - (175 - 179) / 175) < 0.001 for d in sonos_deals), str(sonos_deals))
+check("Sonos: sonos.com's Google row not double-counted alongside the scraped page",
+      "dropped - same store already priced" in (s3.get("sourcenotes") or ""))
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

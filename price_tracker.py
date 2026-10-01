@@ -16,13 +16,23 @@ WHAT IT DOES
   4. Flags deals, records everything in the "Run Data" and "Deals Data" tabs.
      NOTHING else in the workbook is modified.
 
-DEAL DEFINITION (per your instructions)
-  A listing is a deal when its per-item price is
-      (A) >= 15% below this run's average market price   OR
+VENDOR BASELINE (ground truth)
+  The pages in the Master Sheet's "Product URLs" column are priced first (retries, Best Buy API,
+  Shopify variants, JSON-LD / microdata / meta / embedded-JSON extractors, curl_cffi Chrome
+  impersonation, and finally the same store's Google Shopping row). Their median single-unit price -
+  in stock OR sold out - is the "Vendor Baseline (New)". New listings outside 60-140% of it (and resale
+  listings above it) are excluded from averages and deals, so bundles / wrong models can't skew them.
+
+DEAL DEFINITION
+  Only HIGH-confidence, in-stock (or unknown) listings can be deals. A listing is a deal when its
+  per-item price is
+      (A) >= 15% below the vendor baseline (or, with no Product URL priced, the run average
+          of 3+ listings)   OR
       (B) below the trailing-30-day average of previous runs,
-  where the averages are computed SEPARATELY for two price pools:
+  computed SEPARATELY for two price pools:
       - "New"    : new-condition listings (primary vendors + any unlisted new retailer)
-      - "Resale" : secondary-list vendors (eBay, woot!, ...) and any used/refurbished listing
+      - "Resale" : secondary-list vendors (eBay, woot!, ...) and any used/refurbished listing;
+                   with fewer than 3 resale listings, >= 35% below the new vendor baseline counts.
   so resale prices never skew the new-price baseline.
 
 NEVER CRASHES ON A SOURCE FAILURE
@@ -60,6 +70,9 @@ from html import unescape as html_unescape
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
+# Real-Chrome TLS fingerprint client (gets past Akamai bot checks at Best Buy / Dell). Imported under its own
+# name so it doesn't replace the standard `requests` used for SerpApi / eBay / sitemaps.
+from curl_cffi import requests as cffi_requests      # pip install curl_cffi
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
@@ -80,9 +93,20 @@ USE_TARGET_RULE = False       # True = ALSO treat "15% below your Target Price" 
 REQUIRE_AT_OR_BELOW_TARGET = False   # True = never report a "deal" priced above your Target Price
 
 # ---- Noise / sanity filters -------------------------------------------------
-MIN_PRICE_RATIO_OF_TARGET = 0.25   # listings priced under 25% of target are almost surely accessories
+MIN_PRICE_RATIO_OF_TARGET = 0.35   # listings priced under 35% of target are almost surely accessories
 OUTLIER_LOW, OUTLIER_HIGH = 0.4, 2.5   # prices outside 0.4x..2.5x the pool median are excluded from averages
 MAX_DEALS_PER_ITEM = 5             # cap Deals Data rows per item per run
+
+# ---- Vendor baseline (ground truth from your Master Sheet "Product URLs") -------
+# When at least one Product URL is priced, its (single-unit) price becomes the "Vendor Baseline".
+# The New average is then built only from listings within this band around the baseline, and
+# deal rule A compares against the baseline instead of a run average that junk listings can skew.
+ANCHOR_BAND_NEW = (0.60, 1.40)     # new listings outside 60%..140% of the vendor baseline are ignored
+ANCHOR_BAND_RESALE = (0.30, 1.05)  # used/refurb listings above the new baseline are almost always bundles/junk
+DEAL_MIN_CONFIDENCE = "High"       # only High-confidence listings can become deals / target hits
+# Out-of-stock vendor pages still publish the vendor's list price; count it toward the baseline/average
+# (never reported as a deal, since you can't buy it).
+OOS_COUNTS_FOR_BASELINE = True
 
 # ---- Cost control -----------------------------------------------------------
 # Minimum days between checks per Priority. 0 = check on every scheduled run.
@@ -96,6 +120,9 @@ QUERY_INCLUDE_SPECS = True    # add "Product specifications" text to the search 
 
 # ---- Networking -------------------------------------------------------------
 HTTP_TIMEOUT = 15
+PAGE_TIMEOUT = (10, 30)       # (connect, read) seconds for product pages - big retail pages are slow
+PAGE_RETRIES = 2              # extra attempts per Product URL (with backoff) before giving up
+BESTBUY_API_URL = "https://api.bestbuy.com/v1/products(sku={sku})"   # optional: BESTBUY_API_KEY env/secret
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/124.0 Safari/537.36")
 SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
@@ -137,16 +164,19 @@ RUN_COLS = ["RowDateTime", "runID", "WishlistItem", "Product", "Listings Searche
             # --- added by this script (needed for the 30-day trend) ---
             "Avg Price (New)", "Avg Price (Resale)", "30d Trend (New)", "30d Trend (Resale)",
             "Lowest Price Found", "Source Notes", "Matching Listings",
-            "Avg Sample (New)", "Avg Sample (Resale)"]   # how many listings each average is based on
+            "Avg Sample (New)", "Avg Sample (Resale)",    # how many listings each average is based on
+            "Vendor Baseline (New)", "Baseline Source", "Product URL Status"]
 DEALS_COLS = ["runID", "WishlistItem", "Product", "URL", "isPrimaryVendor", "Target Price",
               "Price", "RightProductConfidence",
               # --- added by this script ---
               "Vendor", "Source", "Condition", "Listed Price", "Pack Qty", "% Below Target",
               "Deal Rule", "Secondary Vendor?", "Secondary Vendor Comments",
-              "In Stock Verified", "Listing Title"]
+              "In Stock Verified", "Listing Title", "Baseline Price", "% Below Baseline"]
 MONEY_COLS = {"Target Price", "Price", "Listed Price", "Avg Price (New)", "Avg Price (Resale)",
-              "30d Trend (New)", "30d Trend (Resale)", "Lowest Price Found"}
-COL_WIDTHS = {"URL": 50, "Source Notes": 60, "Listing Title": 55, "Deal Rule": 42,
+              "30d Trend (New)", "30d Trend (Resale)", "Lowest Price Found", "Vendor Baseline (New)",
+              "Baseline Price"}
+PCT_COLS = {"% Below Target", "% Below Baseline"}
+COL_WIDTHS = {"URL": 50, "Source Notes": 60, "Product URL Status": 50, "Listing Title": 55, "Deal Rule": 42,
               "Secondary Vendor Comments": 55, "Vendor": 20, "RowDateTime": 17}
 
 
@@ -263,6 +293,21 @@ def keys_match(a: str, b: str) -> bool:
 ACCESSORY_WORDS = {"case", "cover", "skin", "stand", "bracket", "mount", "mounting", "holder",
                    "protector", "sticker", "decal", "replacement"}
 VARIANT_WORDS = {"pro", "plus", "max", "mini", "lite", "ultra", "se", "xl", "ambiance"}
+# Sibling models sold under the same brand. If a listing names a sibling that is NOT in your product
+# name (e.g. 'Sonos Beam' when you want 'Sonos Ray'), it is a different product -> Low.
+# Add a brand here when you add a product from a new product family.
+MODEL_FAMILIES = {
+    # (words that commonly appear in genuine titles - 'bridge', 'hub', 'one', 'recessed' - are left out)
+    "sonos": {"ray", "beam", "arc", "era", "five", "move", "roam", "sub", "ace", "amp", "port",
+              "playbar", "playbase", "symfonisk"},
+    "hue": {"lightstrip", "bloom", "iris", "signe", "gradient", "centris", "festavia", "datura",
+            "filament", "candle", "dimmer"},
+    "thirdreality": {"nightlight", "button", "e2", "zp1", "zp2"},
+}
+# Phrases that mean "works with X", i.e. an accessory for the product rather than the product itself.
+_FOR_PRODUCT_RE = re.compile(r"\b(?:compatible with|for use with|designed for|fits|works with sonos|"
+                             r"replacement for|for)\s+(?:the\s+)?(?:philips\s+)?(?:sonos|hue|thirdreality|third reality)\b",
+                             re.I)
 
 
 def looks_like_sku(tok: str) -> bool:
@@ -325,6 +370,14 @@ def classify_confidence(item: "Item", title: str, anchor_head: Optional[str] = N
     acc = (head_set & ACCESSORY_WORDS) - set(name_tokens) - spec_tokens
     if acc:
         return "Low", f"accessory word '{sorted(acc)[0]}'"
+    name_set = set(name_tokens)
+    for brand, models in MODEL_FAMILIES.items():            # 'Sonos Beam' is not 'Sonos Ray'
+        if brand in name_set or brand in name_norm.replace(" ", ""):
+            other = (head_set & models) - name_set - spec_tokens
+            if other:
+                return "Low", f"different {brand} model '{sorted(other)[0]}'"
+    if _FOR_PRODUCT_RE.search(title or "") and not (set(t_norm.split()[:3]) & (name_set | {"philips", "sonos"})):
+        return "Low", "accessory 'for/compatible with' listing"
     name_gens = set(re.findall(r"gen\d+", name_norm))
     title_gens = set(re.findall(r"gen\d+", t_norm))
     if name_gens and title_gens and not (name_gens & title_gens):
@@ -463,6 +516,7 @@ class Listing:
     in_stock: Optional[bool] = None   # None = unknown
     seller_comment: str = ""
     seller_ok: bool = True            # False = eBay seller below feedback thresholds
+    from_url: bool = False            # True = priced from one of YOUR Master Sheet Product URLs (ground truth)
     # ---- filled in by score_listings() ----
     pack_qty: int = 1
     unit_price: float = 0.0           # price per single item
@@ -474,6 +528,7 @@ class Listing:
     eligible: bool = False            # counts toward averages
     reportable: bool = False          # may be reported as a deal / target hit
     deal_rule: str = ""
+    ref_price: Optional[float] = None  # the baseline/average this deal was measured against
 
 
 def load_items(ws) -> list:
@@ -508,8 +563,22 @@ def load_items(ws) -> list:
             open_used=truthy(get(r, "used")), target=parse_price(get(r, "target")),
             bulk=truthy(get(r, "bulk")), bulk_sizes=parse_bulk_sizes(get(r, "bkw")),
             skus=skus, spec_phrases=specs + spec_kw,
-            urls=[u for u in split_multi(get(r, "urls")) if u.lower().startswith("http")]))
+            urls=extract_urls(ws.cell(r, c["urls"])) if c.get("urls") else []))
     return items
+
+
+_URL_RE = re.compile(r"https?://[^\s;,<>\"']+", re.I)
+
+
+def extract_urls(cell) -> list:
+    """Every http(s) URL in a cell - separated by ';', ',', spaces or line breaks - plus the cell's
+    clickable hyperlink (Excel stores that separately from the visible text, e.g. text 'Sonos.com')."""
+    found = _URL_RE.findall(str(cell.value or ""))
+    link = getattr(cell, "hyperlink", None)
+    target = getattr(link, "target", None) if link else None
+    if target and target.lower().startswith("http"):
+        found.append(target)
+    return list(dict.fromkeys(u.rstrip(").") for u in found))
 
 
 def load_primary_vendors(ws) -> list:
@@ -549,6 +618,7 @@ def load_history(ws) -> list:
     c_dt, c_w = find_col(hm, "RowDateTime"), find_col(hm, "WishlistItem")
     c_n, c_r = find_col(hm, "Avg Price (New)"), find_col(hm, "Avg Price (Resale)")
     c_sn, c_sr = find_col(hm, "Avg Sample (New)"), find_col(hm, "Avg Sample (Resale)")
+    c_b = find_col(hm, "Vendor Baseline (New)")
     out = []
     for r in range(2, ws.max_row + 1):
         dt = _to_dt(ws.cell(r, c_dt).value) if c_dt else None
@@ -558,18 +628,21 @@ def load_history(ws) -> list:
                     "avg_new": parse_price(ws.cell(r, c_n).value) if c_n else None,
                     "avg_res": parse_price(ws.cell(r, c_r).value) if c_r else None,
                     "n_new": parse_price(ws.cell(r, c_sn).value) if c_sn else None,
-                    "n_res": parse_price(ws.cell(r, c_sr).value) if c_sr else None})
+                    "n_res": parse_price(ws.cell(r, c_sr).value) if c_sr else None,
+                    "baseline": parse_price(ws.cell(r, c_b).value) if c_b else None})
     return out
 
 
 def trend_for(history: list, wid, pool: str, now: datetime) -> Optional[float]:
     """Mean of this item's stored per-run averages over the last TREND_WINDOW_DAYS (needs >= 3 points).
-    Runs whose average came from fewer than MARKET_MIN_SAMPLE listings are left out of the trend."""
+    Runs whose average came from fewer than MARKET_MIN_SAMPLE listings are left out of the trend,
+    unless that run's New average was anchored to a vendor baseline (your Product URLs)."""
     cutoff = now - timedelta(days=TREND_WINDOW_DAYS)
     key, nkey = ("avg_new", "n_new") if pool == "new" else ("avg_res", "n_res")
     vals = [h[key] for h in history
             if h["wid"] == str(wid).strip() and h["dt"] >= cutoff and h[key]
-            and (h.get(nkey) is None or h[nkey] >= MARKET_MIN_SAMPLE)]
+            and (h.get(nkey) is None or h[nkey] >= MARKET_MIN_SAMPLE
+                 or (pool == "new" and h.get("baseline")))]      # vendor-anchored averages are trustworthy
     return round(statistics.mean(vals), 2) if len(vals) >= TREND_MIN_POINTS else None
 
 
@@ -780,6 +853,18 @@ def _walk_ld(node, depth=0):
             yield from _walk_ld(v, depth + 1)
 
 
+def availability_flag(avail) -> Optional[bool]:
+    """schema.org availability -> True (buyable) / False (sold out) / None (unknown or pre/back-order)."""
+    a = str(avail or "").lower().replace(" ", "").replace("_", "")
+    if not a:
+        return None
+    if any(w in a for w in ("instock", "limitedavailability", "onlineonly", "instoreonly")):
+        return True
+    if any(w in a for w in ("outofstock", "soldout", "discontinued", "unavailable")):
+        return False
+    return None
+
+
 def parse_jsonld_product(html: str) -> Optional[dict]:
     """Pull {name, price, in_stock} from schema.org Product JSON-LD (most retail pages embed it)."""
     for block in _LD_RE.findall(html or ""):
@@ -795,11 +880,12 @@ def parse_jsonld_product(html: str) -> Optional[dict]:
             offers = offers if isinstance(offers, list) else [offers] if isinstance(offers, dict) else []
             best = None
             for o in offers:
-                price = parse_price(o.get("price", o.get("lowPrice")))
-                if not price or o.get("priceCurrency", "USD") != "USD":
+                spec = o.get("priceSpecification")
+                spec = spec[0] if isinstance(spec, list) and spec else spec if isinstance(spec, dict) else {}
+                price = parse_price(o.get("price", o.get("lowPrice", spec.get("price"))))
+                if not price or (o.get("priceCurrency") or spec.get("priceCurrency") or "USD") != "USD":
                     continue
-                avail = str(o.get("availability", ""))
-                stock = True if "InStock" in avail else False if avail else None
+                stock = availability_flag(o.get("availability", ""))
                 if best is None or (stock and not best["in_stock"]) or (stock == best["in_stock"] and price < best["price"]):
                     best = {"name": node.get("name", ""), "price": price, "in_stock": stock}
             if best:
@@ -808,7 +894,15 @@ def parse_jsonld_product(html: str) -> Optional[dict]:
 
 
 BROWSER_HEADERS = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9",
-                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                   "Accept-Encoding": "gzip, deflate", "Connection": "keep-alive",
+                   "Upgrade-Insecure-Requests": "1", "Cache-Control": "no-cache",
+                   "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none",
+                   "Sec-Fetch-User": "?1",
+                   "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                   "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"'}
+
+
 _SITEMAP_CACHE: dict = {}          # domain -> list of URLs (shared by all items in one run)
 _BLOCKED_STATUSES = {202, 401, 403, 429, 503}
 _NON_PRODUCT_PATHS = ("/search", "/blog", "/support", "/help", "/compare", "/collections", "/category",
@@ -958,7 +1052,9 @@ def shopify_variant_listings(base: str, handle: str, title: str, vendor_name: st
     if r is None or not r.ok:
         return []
     try:
-        variants = r.json().get("variants") or []
+        data = r.json()
+        variants = data.get("variants") or []
+        title = data.get("title") or title          # the store's own product name beats ours
     except ValueError:
         return []
     out = []
@@ -1005,26 +1101,157 @@ def shopify_listings(vendor: Vendor, item: Item, session) -> Optional[tuple]:
     return out, note
 
 
+def parse_microdata_price(page_html: str) -> Optional[dict]:
+    """schema.org microdata (<span itemprop="price" content="219.00">) - used by Dell and many older stores."""
+    m = re.search(r"""itemprop=["']price["'][^>]*?content=["']([^"']+)""", page_html or "", re.I) or \
+        re.search(r"""content=["']([\d.,]+)["'][^>]*?itemprop=["']price["']""", page_html or "", re.I)
+    if not m or not parse_price(m.group(1)):
+        return None
+    a = re.search(r"""itemprop=["']availability["'][^>]*?(?:href|content)=["']([^"']+)""", page_html, re.I)
+    n = re.search(r"""itemprop=["']name["'][^>]*?content=["']([^"']+)""", page_html, re.I)
+    return {"name": html_unescape(n.group(1)) if n else "", "price": parse_price(m.group(1)),
+            "in_stock": availability_flag(a.group(1)) if a else None}
+
+
+# Keys that hold "the price you pay" inside a page's embedded JSON state (Next.js __NEXT_DATA__, Redux
+# state, Best Buy / Dell data layers ...). Earlier keys are preferred; 'regularPrice' is the list price.
+_EMBEDDED_PRICE_KEYS = ("customerPrice", "currentPrice", "salePrice", "finalPrice", "dellPrice",
+                        "sellingPrice", "offerPrice", "priceValue", "regularPrice", "listPrice")
+
+
+def parse_embedded_price(page_html: str, target: Optional[float] = None) -> Optional[dict]:
+    """Last-resort extractor for JavaScript-heavy pages with no JSON-LD/meta price: scan embedded
+    JSON for well-known price keys, then visible '<... class="...price...">$219.00' markup.
+    Values implausibly far from your Target Price (<25% or >4x) are skipped - they are usually
+    accessories, financing ('$18/mo') or bundle prices from elsewhere on the page."""
+    text = page_html or ""
+
+    def plausible(p):
+        return p and p > 0 and (not target or target * MIN_PRICE_RATIO_OF_TARGET <= p <= target * 4)
+
+    for key in _EMBEDDED_PRICE_KEYS:
+        for m in re.finditer(r'\\?"%s\\?"\s*:\s*\\?"?\$?\s*([\d,]+(?:\.\d+)?)' % key, text):
+            p = parse_price(m.group(1))
+            if plausible(p):
+                return {"name": "", "price": p, "in_stock": _embedded_stock(text), "how": f"embedded '{key}'"}
+    for m in re.finditer(r"""(?:class|data-testid|id)=["'][^"']*price[^"']*["'][^>]*>\s*(?:<[^>]+>\s*){0,4}\$\s*([\d,]+\.\d{2})""",
+                         text, re.I):
+        p = parse_price(m.group(1))
+        if plausible(p):
+            return {"name": "", "price": p, "in_stock": _embedded_stock(text), "how": "visible price markup"}
+    return None
+
+
+def _embedded_stock(text: str) -> Optional[bool]:
+    if re.search(r'"(?:buttonState|availability|stockStatus)"\s*:\s*"(?:SOLD_OUT|OUT_OF_STOCK|OutOfStock|SoldOut)"', text, re.I) \
+            or re.search(r">\s*(?:Sold Out|Out of Stock|Currently unavailable)\s*<", text, re.I):
+        return False
+    if re.search(r'"(?:buttonState|availability|stockStatus)"\s*:\s*"(?:ADD_TO_CART|IN_STOCK|InStock)"', text, re.I):
+        return True
+    return None
+
+
+def fetch_page(url: str, session) -> tuple:
+    """GET a product page as robustly as we can. Returns (response|None, reason).
+       1) requests with full browser headers, retried with backoff on network errors / 429 / 5xx;
+       2) if still blocked or timing out, retry with curl_cffi impersonating real Chrome
+          (Best Buy and Dell sit behind Akamai, which drops plain Python TLS handshakes - that is
+          what showed up as 'network error')."""
+    last = "network error"
+    for attempt in range(PAGE_RETRIES + 1):
+        try:
+            r = session.get(url, headers=BROWSER_HEADERS, timeout=PAGE_TIMEOUT, allow_redirects=True)
+        except Exception as e:
+            last = f"network error ({type(e).__name__})"
+            r = None
+        if r is not None:
+            if r.ok and r.status_code != 202:
+                return r, "ok"
+            last = (f"site blocked automated access (HTTP {r.status_code})" if r.status_code in _BLOCKED_STATUSES
+                    else f"HTTP {r.status_code}")
+            if r.status_code == 404:
+                return None, last + " - check the URL in the Master Sheet"
+            if r.status_code in (401, 403):
+                break                                   # retrying the same client won't help
+        time.sleep(1.5 * (attempt + 1))
+    if cffi_requests is not None:              # (tests may switch it off)
+        try:
+            r = cffi_requests.get(url, impersonate="chrome", timeout=PAGE_TIMEOUT[1],
+                                  headers={"Accept-Language": "en-US,en;q=0.9"})
+            if r.status_code == 200:
+                return r, "ok (browser impersonation)"
+            last += f"; browser impersonation HTTP {r.status_code}"
+        except Exception as e:
+            last += f"; browser impersonation {type(e).__name__}"
+    return None, last
+
+
+def _bestbuy_sku(url: str) -> Optional[str]:
+    m = re.search(r"(?:skuId=|/sku/|/)(\d{7})(?:\.p\b|\b)", url)
+    return m.group(1) if m else None
+
+
+def bestbuy_api_listing(url: str, vendor_name: str, session) -> tuple:
+    """Best Buy's official Products API (free key at developer.bestbuy.com -> BESTBUY_API_KEY).
+    Never blocked, returns salePrice + onlineAvailability. Returns (listings|None, reason)."""
+    key, sku = os.getenv("BESTBUY_API_KEY"), _bestbuy_sku(url)
+    if not key or not sku:
+        return None, "no BESTBUY_API_KEY" if not key else "no SKU in URL"
+    try:
+        r = session.get(BESTBUY_API_URL.format(sku=sku), timeout=HTTP_TIMEOUT, params={
+            "apiKey": key, "format": "json", "show": "sku,name,salePrice,regularPrice,onlineAvailability,url"})
+        prods = (r.json().get("products") or []) if r.ok else []
+    except Exception as e:
+        return None, f"Best Buy API {type(e).__name__}"
+    if not prods:
+        return None, f"Best Buy API HTTP {r.status_code}, SKU {sku} not found"
+    p = prods[0]
+    price = parse_price(p.get("salePrice") or p.get("regularPrice"))
+    if not price:
+        return None, "Best Buy API returned no price"
+    return [Listing(title=p.get("name") or "", url=url, price=price, vendor=vendor_name, source="direct",
+                    in_stock=bool(p.get("onlineAvailability")))], "ok (Best Buy API)"
+
+
 def page_listing(url: str, vendor_name: str, item: Item, session) -> tuple:
-    """Price one product page (JSON-LD, then meta tags, then Shopify .js). Returns (Listing|None, reason)."""
-    r = _get(session, url)
+    """Price one product page. Returns (list of Listings | None, reason). Order of attempts:
+       site API (Best Buy) -> Shopify variants (.js, every pack size) -> page JSON-LD -> microdata
+       -> Open Graph meta -> embedded JSON / visible price markup."""
+    parts = urlparse(url)
+    host = parts.netloc.lower()
+    if "bestbuy.com" in host:
+        ls, why = bestbuy_api_listing(url, vendor_name, session)
+        if ls:
+            return ls, why
+    shop = re.search(r"/products/([^/?#]+)", parts.path)
+    if shop:                       # Shopify: the .js endpoint lists every variant (1/2/4-pack) + stock
+        vs = shopify_variant_listings(f"{parts.scheme}://{parts.netloc}", shop.group(1), item.product, vendor_name, session)
+        if vs:
+            m = re.search(r"[?&]variant=(\d+)", url)          # you linked one specific variant -> keep only it
+            pick = [v for v in vs if m and f"variant={m.group(1)}" in v.url]
+            return (pick or vs), "ok (Shopify variants)"
+    r, why = fetch_page(url, session)
     if r is None:
-        return None, "network error"
-    if r.status_code in _BLOCKED_STATUSES:
-        return None, f"site blocked automated access (HTTP {r.status_code})"
-    if not r.ok:
-        return None, f"HTTP {r.status_code}"
-    info = parse_jsonld_product(r.text) or parse_meta_price(r.text)
-    if not info or not info.get("price"):
-        m = re.search(r"/products/([^/?#]+)", urlparse(url).path)
-        if m:                                                    # Shopify page without structured data
-            parts = urlparse(url)
-            vs = shopify_variant_listings(f"{parts.scheme}://{parts.netloc}", m.group(1), item.product, vendor_name, session)
-            if vs:
-                return vs, "ok"
-        return None, "no price data on page"
-    return [Listing(title=info.get("name") or item.product, url=url, price=info["price"], vendor=vendor_name,
-                    source="direct", in_stock=info.get("in_stock"))], "ok"
+        return None, why
+    html = r.text
+    info, how = None, ""
+    for fn, label in ((parse_jsonld_product, "JSON-LD"), (parse_microdata_price, "microdata"),
+                      (parse_meta_price, "meta tags")):
+        info = fn(html)
+        if info and info.get("price"):
+            how = label
+            break
+    if not (info and info.get("price")):
+        info = parse_embedded_price(html, item.target)
+        how = info.get("how", "") if info else ""
+    if not (info and info.get("price")):
+        return None, "no price data on page (JavaScript-rendered)"
+    title = info.get("name") or ""
+    if not title:
+        t = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        title = html_unescape(t.group(1)).strip() if t else ""
+    return [Listing(title=title or item.product, url=url, price=info["price"], vendor=vendor_name,
+                    source="direct", in_stock=info.get("in_stock"))], f"ok ({how})"
 
 
 def direct_vendor_listings(vendor: Vendor, item: Item, session) -> tuple:
@@ -1063,17 +1290,34 @@ def direct_vendor_listings(vendor: Vendor, item: Item, session) -> tuple:
 
 def product_url_listings(item: Item, ctx: "Context") -> tuple:
     """Price the exact pages listed in the Master Sheet's optional 'Product URLs' column.
-    Returns (listings, note, set_of_domains_covered)."""
-    out, notes, covered = [], [], set()
+    Returns (listings, status_dict {url: reason}, set_of_domains_covered, failed [(url, host, vendor_name)]).
+    These listings are YOUR verified product pages, so they are trusted as the exact product (High)."""
+    out, status, covered, failed = [], {}, set(), []
     for u in item.urls:
         host = urlparse(u).netloc.lower().replace("www.", "")
         covered.add(host)
-        vname = next((v.name for v in ctx.primary if v.domain and host.endswith(v.domain.replace("www.", ""))), host)
+        vname = url_vendor_name(host, ctx.primary)
         ls, why = page_listing(u, vname, item, ctx.session)
+        for l in ls or []:
+            l.from_url = True
         out += ls or []
-        notes.append(f"{host}: {'ok' if ls else why}")
+        if ls:
+            stock = {True: "in stock", False: "OUT OF STOCK", None: "stock unknown"}[ls[0].in_stock]
+            status[u] = f"{host}: ${ls[0].price:,.2f} {stock} - {why}" + (f" (+{len(ls) - 1} variants)" if len(ls) > 1 else "")
+        else:
+            status[u] = f"{host}: FAILED - {why}"
+            failed.append((u, host, vname))
         time.sleep(0.5)
-    return out, "Product URLs[" + "; ".join(notes) + "]", covered
+    return out, status, covered, failed
+
+
+def url_vendor_name(host: str, primary: list) -> str:
+    """'bestbuy.com' -> 'Best Buy' (your Primary Vendor name) so isPrimaryVendor is set correctly."""
+    for v in primary:
+        if v.domain and host.endswith(v.domain.replace("www.", "")):
+            return v.name
+    hkey = vendor_key(host.split(":")[0])
+    return next((v.name for v in primary if keys_match(hkey, v.key)), host)
 
 
 def vendor_name_matches_product(vendor_name: str, item: Item) -> bool:
@@ -1104,11 +1348,13 @@ class Context:
 
 
 def dedupe(listings: list) -> list:
-    """Drop repeats of the same (vendor, unit price, title start). Direct > eBay API > SerpApi on ties."""
+    """Drop repeats of the same offer. Your Product URLs > direct > eBay API > SerpApi on ties."""
     rank = {"direct": 0, "ebay": 1, "serpapi": 2}
     seen, out = set(), []
-    for l in sorted(listings, key=lambda x: rank.get(x.source, 9)):
-        k = (l.vkey, round(l.unit_price, 2), norm_text(l.title)[:40])
+    for l in sorted(listings, key=lambda x: (not x.from_url, rank.get(x.source, 9))):
+        # Same store + same unit price = same offer, even when Google's title differs from the page title.
+        # (eBay is many independent sellers under one name, so its title/URL stay in the key.)
+        k = (l.vkey, round(l.unit_price, 2)) + ((norm_text(l.title)[:40], l.url) if l.vkey == "ebay" else ())
         if k not in seen:
             seen.add(k)
             out.append(l)
@@ -1135,22 +1381,83 @@ def score_listings(item: Item, listings: list, ctx: Context) -> list:
 
     allowed_packs = {1} | (item.bulk_sizes if item.bulk else set())
     for l in listings:
-        l.confidence, l.conf_reason = classify_confidence(item, l.title, anchor)
-        ok = (l.condition != "parts" and l.pack_qty in allowed_packs
-              and l.confidence in ("High", "Medium") and l.in_stock is not False)
-        if item.target:
+        if l.from_url and l.source == "direct":     # you picked this exact page in the Master Sheet
+            l.confidence, l.conf_reason = "High", "your Product URL"
+        else:
+            l.confidence, l.conf_reason = classify_confidence(item, l.title, anchor)
+        ok = (l.condition != "parts" and l.pack_qty in allowed_packs and l.confidence in ("High", "Medium"))
+        # Sold-out pages: a vendor's own sold-out page still shows its real list price, so it may feed the
+        # baseline/average; a sold-out third-party listing is dropped. Neither can ever be a deal.
+        if l.in_stock is False and not (OOS_COUNTS_FOR_BASELINE and l.source == "direct" and not l.is_resale):
+            ok = False
+        if item.target and not l.from_url:
             ok = ok and l.unit_price >= item.target * MIN_PRICE_RATIO_OF_TARGET
         if l.is_resale and not item.open_used:
             ok = False                                   # used/resale only when the Master Sheet says Yes
         l.eligible = ok
         # Items NOT open to used/wider search: only report new listings from Primary Vendors.
         # (Other new retailers still feed the price baseline, which stabilises the averages.)
-        l.reportable = ok and (item.open_used or (l.is_primary and not l.is_resale))
+        l.reportable = (ok and l.in_stock is not False
+                        and (item.open_used or (l.is_primary and not l.is_resale)))
     return listings
 
 
+def vendor_baseline(item: Item, listings: list) -> tuple:
+    """Ground-truth 'New' price from YOUR Product URLs: median single-unit price of those pages
+    (in stock or not). Falls back to High-confidence direct-vendor pages the script found itself.
+    Returns (single-unit price | None, source description, {pack_qty: per-unit price})."""
+    for label, pool in (("Product URLs", [l for l in listings if l.from_url]),
+                        ("direct vendor site", [l for l in listings if l.source == "direct" and not l.from_url
+                                                and l.confidence == "High"])):
+        pool = [l for l in pool if l.eligible and not l.is_resale]
+        if not pool:
+            continue
+        singles = [l for l in pool if l.pack_qty == 1] or pool
+        price = round(statistics.median(l.unit_price for l in singles), 2)
+        names = sorted({l.vendor for l in singles})
+        # Per-pack-size baselines: a 4-pack is compared with the vendor's own 4-pack price, so normal
+        # bulk pricing is not reported as a "deal" on every run.
+        packs = {q: round(statistics.median(l.unit_price for l in pool if l.pack_qty == q), 2)
+                 for q in {l.pack_qty for l in pool}}
+        return price, f"{label}: {', '.join(names)} (median of {len(singles)})", packs
+    return None, "none (no Product URL priced) - using market average", {}
+
+
+def apply_baseline(item: Item, listings: list, baseline: Optional[float]) -> None:
+    """With a vendor baseline in hand:
+       * listings outside the plausible band around it stop counting toward averages/deals
+         (this is what kept $454 'Sonos Ray' bundles and Beam/Arc listings out of the New average);
+       * an exact-SKU Medium listing priced inside the band is promoted to High (SKU + price both agree)."""
+    if not baseline:
+        # No vendor price: SKU + agreement with the market median still corroborates a Medium listing.
+        for resale in (False, True):
+            prices = [l.unit_price for l in listings if l.eligible and l.is_resale == resale]
+            if len(prices) < MARKET_MIN_SAMPLE:
+                continue
+            med = statistics.median(prices)
+            for l in listings:
+                if (l.eligible and l.is_resale == resale and l.confidence == "Medium" and item.skus
+                        and med * ANCHOR_BAND_NEW[0] <= l.unit_price <= med * ANCHOR_BAND_NEW[1]
+                        and any(s.lower().replace("-", "") in norm_text(l.title).replace(" ", "") for s in item.skus)):
+                    l.confidence, l.conf_reason = "High", "SKU match + price agrees with market median"
+        return
+    for l in listings:
+        if l.from_url:
+            continue
+        lo, hi = ANCHOR_BAND_RESALE if l.is_resale else ANCHOR_BAND_NEW
+        inside = baseline * lo <= l.unit_price <= baseline * hi
+        if not inside:
+            if l.eligible:
+                l.conf_reason += f"; price outside {lo:.0%}-{hi:.0%} of vendor baseline"
+            l.eligible = l.reportable = False
+        elif l.confidence == "Medium" and item.skus and \
+                any(s.lower().replace("-", "") in norm_text(l.title).replace(" ", "") for s in item.skus):
+            l.confidence, l.conf_reason = "High", "SKU match + price agrees with vendor baseline"
+
+
 def pool_stats(prices: list) -> Optional[dict]:
-    """Average with outliers removed (prices beyond 0.4x-2.5x the median are likely wrong products)."""
+    """Average with outliers removed (prices beyond 0.4x-2.5x the median are likely wrong products).
+    When a vendor baseline exists, apply_baseline() has already narrowed the pool around it."""
     if not prices:
         return None
     med = statistics.median(prices)
@@ -1159,21 +1466,46 @@ def pool_stats(prices: list) -> Optional[dict]:
     return {"avg": round(statistics.mean(kept), 2), "n": len(kept), "lo": lo} if kept else None
 
 
-def find_deals(item: Item, listings: list, stats: dict, trends: dict) -> list:
-    """Apply rules A and B per pool and return deals sorted: primary vendors first, then by price."""
+RESALE_VS_NEW_DISCOUNT = 0.35   # resale deal when the resale pool is too small: >=35% below the new baseline
+
+
+def find_deals(item: Item, listings: list, stats: dict, trends: dict, baseline: Optional[float] = None,
+               pack_baselines: Optional[dict] = None) -> list:
+    """Apply the deal rules and return deals sorted: primary vendors first, then by price.
+    Only listings at DEAL_MIN_CONFIDENCE (High) with an in-stock/unknown status can become deals.
+      New pool    - rule A: >=15% below the VENDOR BASELINE (or the run average when no Product URL priced,
+                    which then needs MARKET_MIN_SAMPLE listings); rule B: below the 30-day trend.
+      Resale pool - rule A: >=15% below the resale average (needs MARKET_MIN_SAMPLE listings), or
+                    >=35% below the new vendor baseline; rule B: below the resale 30-day trend.
+    Each deal records the reference price it beat in l.ref_price."""
     deals = []
     for l in listings:
-        if not (l.reportable and l.seller_ok):
+        if not (l.reportable and l.seller_ok and l.confidence == DEAL_MIN_CONFIDENCE):
             continue
         if REQUIRE_AT_OR_BELOW_TARGET and item.target and l.unit_price > item.target:
             continue
         pool = "res" if l.is_resale else "new"
-        st, trend, reasons = stats.get(pool), trends.get(pool), []
-        if st and st["n"] >= MARKET_MIN_SAMPLE and l.unit_price >= st["lo"]:   # 'too good to be true' guard
-            if l.unit_price <= st["avg"] * (1 - DEAL_DISCOUNT):
-                reasons.append(f">=15% below run avg ${st['avg']:.2f}")
-            if trend and l.unit_price < trend * (1 - TREND_MIN_DISCOUNT):
-                reasons.append(f"below 30d trend ${trend:.2f}")
+        st, trend, reasons, ref = stats.get(pool), trends.get(pool), [], None
+        market_ok = bool(st and st["n"] >= MARKET_MIN_SAMPLE)
+        if pool == "new" and baseline:
+            ref = (pack_baselines or {}).get(l.pack_qty, baseline)
+            ref_label = "vendor baseline" + (f" ({l.pack_qty}-pack)" if l.pack_qty in (pack_baselines or {}) and l.pack_qty > 1 else "")
+        elif market_ok:
+            ref, ref_label = st["avg"], "run avg"
+        elif pool == "res" and baseline:
+            ref, ref_label = None, ""
+            if l.unit_price <= baseline * (1 - RESALE_VS_NEW_DISCOUNT):
+                reasons.append(f">={RESALE_VS_NEW_DISCOUNT:.0%} below new vendor baseline ${baseline:.2f}")
+                l.ref_price = baseline
+        else:
+            ref_label = ""
+        if ref and l.unit_price >= ref * OUTLIER_LOW:                     # 'too good to be true' guard
+            if l.unit_price <= ref * (1 - DEAL_DISCOUNT):
+                reasons.append(f">={DEAL_DISCOUNT:.0%} below {ref_label} ${ref:.2f}")
+            l.ref_price = ref
+        if trend and (market_ok or baseline) and l.unit_price < trend * (1 - TREND_MIN_DISCOUNT):
+            reasons.append(f"below 30d trend ${trend:.2f}")
+            l.ref_price = l.ref_price or trend
         if USE_TARGET_RULE and item.target and l.unit_price <= item.target * (1 - DEAL_DISCOUNT):
             reasons.append(f">=15% below target ${item.target:.2f}")
         if reasons:
@@ -1194,17 +1526,37 @@ def stock_status(l: Listing) -> str:
     return "N/A"
 
 
+def google_fill_failed_urls(item: Item, failed: list, serp_ls: list) -> tuple:
+    """A Product URL whose page could not be priced (blocked, JavaScript-only) is filled from the SAME
+    merchant's Google Shopping row, if Google has a matching one. The Google row is moved (not copied)
+    so it is never counted twice. Returns (filled listings, remaining serp listings, {url: note})."""
+    filled, notes, used = [], {}, set()
+    for url, host, vname in failed:
+        keys = {vendor_key(vname), vendor_key(host)}
+        cands = [l for l in serp_ls if id(l) not in used and any(keys_match(vendor_key(l.vendor), k) for k in keys)
+                 and l.condition == "new" and classify_confidence(item, l.title)[0] in ("High", "Medium")]
+        if not cands:
+            continue
+        best = min(cands, key=lambda l: (classify_confidence(item, l.title)[0] != "High", extract_pack_qty(l.title)))
+        used.add(id(best))
+        best.from_url, best.vendor = True, vname
+        best.seller_comment = f"price from Google Shopping (direct page failed); Google link: {best.url}"
+        best.url = url
+        filled.append(best)
+        notes[url] = f"{host}: ${best.price:,.2f} via Google Shopping fallback"
+    return filled, [l for l in serp_ls if id(l) not in used], notes
+
+
 def process_item(item: Item, ctx: Context) -> tuple:
     """Run every pipeline for one item. Returns (run_row dict, deal_row dicts, deal Listings)."""
     a = ctx.args
     listings, notes = [], []
 
-    # --- Exact pages you listed in the Master Sheet ("Product URLs" column, optional) ---
-    covered = set()
+    # --- Exact pages you listed in the Master Sheet ("Product URLs" column) - the ground truth ---
+    covered, url_status, failed = set(), {}, []
     if item.urls and not a.no_direct:
-        ls, note, covered = product_url_listings(item, ctx)
+        ls, url_status, covered, failed = product_url_listings(item, ctx)
         listings += ls
-        notes.append(note)
 
     # --- Direct-to-consumer sites whose name loosely matches the product -------
     if not a.no_direct:
@@ -1235,6 +1587,18 @@ def process_item(item: Item, ctx: Context) -> tuple:
                 serp_ls += parse_serpapi(raw2 or [])
             notes.append(f"SerpApi: {len(serp_ls)} listings")
 
+    # --- Google Shopping <-> Product URLs: fill failures, never double count ------------
+    if failed and serp_ls:
+        filled, serp_ls, fill_notes = google_fill_failed_urls(item, failed, serp_ls)
+        listings += filled
+        url_status.update(fill_notes)
+    ok_keys = {vendor_key(l.vendor) for l in listings if l.from_url and l.source == "direct"}
+    if ok_keys:   # the store's own page was priced directly; its Google row is a stale duplicate
+        before = len(serp_ls)
+        serp_ls = [l for l in serp_ls if not any(keys_match(vendor_key(l.vendor), k) for k in ok_keys)]
+        if before != len(serp_ls):
+            notes.append(f"SerpApi: {before - len(serp_ls)} row(s) dropped - same store already priced from your Product URL")
+
     # --- Pipeline B: eBay (only when open to used / wider search) -------------
     ebay_ls, ebay_ok = [], False
     if item.open_used:
@@ -1257,15 +1621,17 @@ def process_item(item: Item, ctx: Context) -> tuple:
     score_listings(item, listings, ctx)
     listings = dedupe(listings)
 
-    # --- Averages (current run) and trends (Run Data history) ------------------
+    # --- Vendor baseline (ground truth), averages, trends --------------------------
+    baseline, baseline_src, pack_baselines = vendor_baseline(item, listings)
+    apply_baseline(item, listings, baseline)
     stats = {"new": pool_stats([l.unit_price for l in listings if l.eligible and not l.is_resale]),
              "res": pool_stats([l.unit_price for l in listings if l.eligible and l.is_resale])}
     trends = {"new": trend_for(ctx.history, item.wid, "new", ctx.now),
               "res": trend_for(ctx.history, item.wid, "res", ctx.now)}
-    deals = find_deals(item, listings, stats, trends)
+    deals = find_deals(item, listings, stats, trends, baseline, pack_baselines)
 
     # --- Build output rows -----------------------------------------------------
-    rep = [l for l in listings if l.reportable]
+    rep = [l for l in listings if l.reportable and l.confidence == DEAL_MIN_CONFIDENCE]
     tgt = item.target
     at_target = [l for l in rep if tgt and l.unit_price <= tgt]
     lowest = min((l.unit_price for l in rep), default=None)
@@ -1280,9 +1646,15 @@ def process_item(item: Item, ctx: Context) -> tuple:
 
     for pool, label in (("new", "New"), ("res", "Resale")):
         s = stats[pool]
-        if s and s["n"] < MARKET_MIN_SAMPLE:
+        if s and s["n"] < MARKET_MIN_SAMPLE and not (pool == "new" and baseline):
             notes.append(f"Avg ({label}) from only {s['n']} listing(s): recorded, but deal rules and the "
                          f"30-day trend need {MARKET_MIN_SAMPLE}+")
+    if baseline:
+        oos = [l.vendor for l in listings if l.from_url and l.in_stock is False]
+        if oos:
+            notes.append(f"Vendor baseline includes sold-out page(s) ({', '.join(sorted(set(oos)))}) - list price only")
+    if item.urls and a.no_direct:
+        url_status = {u: "skipped (--no-direct)" for u in item.urls}
 
     run_row = {
         "RowDateTime": ctx.now, "runID": ctx.run_id, "WishlistItem": item.wid, "Product": item.product,
@@ -1294,16 +1666,23 @@ def process_item(item: Item, ctx: Context) -> tuple:
         "Avg Price (New)": store("new"), "Avg Price (Resale)": store("res"),
         "Avg Sample (New)": sample("new"), "Avg Sample (Resale)": sample("res"),
         "30d Trend (New)": trends["new"], "30d Trend (Resale)": trends["res"],
+        "Vendor Baseline (New)": baseline, "Baseline Source": baseline_src,
+        "Product URL Status": " | ".join(url_status.values())[:900] if url_status else
+                              ("none listed in Master Sheet" if not item.urls else None),
         "Lowest Price Found": lowest, "Source Notes": " | ".join(notes)[:900]}
 
     deal_rows = []
     for l in deals:
+        ref = l.ref_price
         deal_rows.append({
             "runID": ctx.run_id, "WishlistItem": item.wid, "Product": item.product, "URL": l.url,
             "isPrimaryVendor": 1 if l.is_primary else 0, "Target Price": tgt, "Price": l.unit_price,
             "RightProductConfidence": l.confidence, "Vendor": l.vendor, "Source": l.source,
             "Condition": l.condition, "Listed Price": l.price, "Pack Qty": l.pack_qty,
+            # per-UNIT price vs per-item target; negative = above your target
             "% Below Target": round((tgt - l.unit_price) / tgt, 4) if tgt else None,
+            "Baseline Price": ref,
+            "% Below Baseline": round((ref - l.unit_price) / ref, 4) if ref else None,
             "Deal Rule": l.deal_rule, "Secondary Vendor?": "Yes" if l.is_resale else "No",
             "Secondary Vendor Comments": (l.seller_comment or "N/A (no seller rating available)") if l.is_resale else "",
             "In Stock Verified": stock_status(l), "Listing Title": l.title[:200]})
@@ -1356,7 +1735,7 @@ def append_rows(ws, wanted: list, rows: list) -> None:
                 cell.number_format = "yyyy-mm-dd hh:mm"
             elif name in MONEY_COLS:
                 cell.number_format = "$#,##0.00"
-            elif name == "% Below Target":
+            elif name in PCT_COLS:
                 cell.number_format = "0.0%"
 
 
