@@ -32,6 +32,10 @@ _CONDITIONAL_PATTERNS = [
 ]
 
 
+# '$210+' = "from" price across several sellers; 'CA$280+', '£', '€' = not US dollars (Google localises some rows)
+_FOREIGN_CCY = re.compile(r"[£€¥₹₩]|(?<![A-Za-z])(?!US\$)[A-Za-z]{1,3}\$")
+
+
 def conditional_kind(*texts) -> tuple:
     blob = " | ".join(str(t) for t in texts if t)
     for kind, rx in _CONDITIONAL_PATTERNS:
@@ -132,6 +136,9 @@ def parse_serpapi(results: list) -> list:
             price = parse_price(r.get("price"))
         if not title or not price or price <= 0:
             continue
+        price_txt = r.get("price") if isinstance(r.get("price"), str) else ""
+        if _FOREIGN_CCY.search(price_txt):            # e.g. 'CA$280+' must never be read as $280 USD
+            continue
         vendor = re.sub(r"^from\s+", "", r.get("source") or "", flags=re.I).strip()
         comment = ""
         if r.get("rating"):
@@ -146,6 +153,18 @@ def parse_serpapi(results: list) -> list:
         link = r.get("link") or ""
         direct = link if link.startswith("http") and "google." not in host_of(link) else ""
         google = r.get("product_link") or (link if not direct else "")
+        pid = str(r.get("product_id") or "")
+        if not direct and not google and pid:         # product-level rows carry no link: use Google's own product page
+            google = f"https://www.google.com/shopping/product/{pid}?gl=us&hl=en"
+        several = bool(r.get("multiple_sources")) or price_txt.rstrip().endswith("+")
+        if not vendor:
+            # no merchant named: show the merchant link's host; a product-level row ("several sellers", price is the
+            # lowest of them) is labelled as such instead of being left blank
+            vendor = host_of(direct) if direct else ("Google Shopping (several sellers)" if several
+                                                      else "Google Shopping (seller not listed)")
+        if several and not direct:
+            comment = (comment + "; " if comment else "") + \
+                      f"Google lists several sellers from {price_txt or '$' + format(price, '.2f')}; merchant not named - confirm on Google"
         out.append(Listing(
             title=title, url=normalize_url(direct) if direct else google, price=float(price), vendor=vendor,
             source="serpapi", evidence=MARKET_SNAPSHOT,

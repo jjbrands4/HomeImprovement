@@ -375,6 +375,10 @@ def conflicts(item: Item, title: str, gtins: set = frozenset(), mpns: set = froz
         if ic in l_codes or ic in norm_code(title):
             continue
         for lc in l_codes:
+            # a listing carrying another of the item's OWN model codes (e.g. 1-pack P1SPD1Z vs 4-pack
+            # P1SPD4Z, both listed in the MPN cell) is the same product line, not a different variant
+            if lc in item_codes:
+                continue
             if lc not in allowed_codes and near_variant(ic, lc):
                 return f"different variant of model {ic} ({lc})"
 
@@ -519,8 +523,28 @@ def has_identifier_hit(item: Item, title: str, gtins: set = frozenset(), mpns: s
 # Validating a trusted-candidate page (Master Sheet Product URL / cached discovery)
 # =============================================================================
 
+def brand_owns_domain(item: Item, host: str) -> bool:
+    """True when the page's host is the item's OWN brand's site (samsung.com for a Samsung TV, us.govee.com for a
+    Govee strip). Needs the Brand named in the Master Sheet (or learned from a validated page) - the first word of
+    the product name is not trusted for this."""
+    comp = re.sub(r"[^a-z0-9]", "", (host or "").lower())
+    brand = norm_text(item.brand or item.learned_brand)
+    cands = {brand.replace(" ", ""), brand.split()[0] if brand else ""}
+    return bool(comp) and any(len(b) >= 4 and b in comp for b in cands)
+
+
 def validate_page(item: Item, title: str, gtins: set, mpns: set, brand_hint: str = "", domain_brand: str = "",
-                  slug: str = "", pack_qty: int = 1, color: str = "") -> Match:
+                  slug: str = "", pack_qty: int = 1, color: str = "", host: str = "") -> Match:
+    """See _validate_page. A page on the brand's own site that is not contradicted by anything (no hard conflict:
+    right model code, size, colour, pack ...) is the product: an unconfirmed (Medium) page there is promoted to High."""
+    m = _validate_page(item, title, gtins, mpns, brand_hint, domain_brand, slug, pack_qty, color)
+    if m.confidence == "Medium" and brand_owns_domain(item, host):
+        return Match("High", f"Product URL on the brand's own site ({host}), no conflicts - {m.reason}", "brand_site")
+    return m
+
+
+def _validate_page(item: Item, title: str, gtins: set, mpns: set, brand_hint: str = "", domain_brand: str = "",
+                   slug: str = "", pack_qty: int = 1, color: str = "") -> Match:
     """A Product URL is a trusted CANDIDATE, not proof. Accept its page as the product when:
          * an identifier matches (GTIN / MPN) and nothing conflicts            -> High (gtin / mpn)
          * or the page title (plus URL slug) carries the distinctive name words -> High (product_url)

@@ -31,26 +31,25 @@ NEGATIVE_TTL_DAYS = 10           # 'retailer does not carry it' is re-checked af
 # Known retailer domains (vendor key -> domain). Extend via a 'Domain' column in the vendor tab.
 KNOWN_DOMAINS = {
     "philipshue": "www.philips-hue.com", "sonos": "www.sonos.com", "thirdreality": "www.thirdreality.com",
-    "bhphotovideo": "www.bhphotovideo.com", "superbrightleds": "www.superbrightleds.com", "dell": "www.dell.com",
-    "microcenter": "www.microcenter.com", "homedepot": "www.homedepot.com", "lowes": "www.lowes.com",
+    "superbrightleds": "www.superbrightleds.com", "dell": "www.dell.com",
+    "microcenter": "www.microcenter.com", "homedepot": "www.homedepot.com",
     "bestbuy": "www.bestbuy.com", "amazon": "www.amazon.com",
 }
-# Retailers whose pages are never crawled here: Best Buy is priced through its official API instead,
-# Amazon forbids automated access (its prices come from Product URLs you add or Google Shopping).
+# Retailers whose pages are never crawled here (their search pages are bot-walled and no API access is available):
+# Best Buy / Amazon prices come from the Product URLs you add (and, for a dead link, the same vendor's Google
+# Shopping row).
 NO_CRAWL = {"amazon.com", "bestbuy.com", "walmart.com", "target.com", "ebay.com"}
 SITE_SEARCH = {
-    "bhphotovideo.com": "https://www.bhphotovideo.com/c/search?q={q}",
     "microcenter.com": "https://www.microcenter.com/search/search_results.aspx?Ntt={q}",
     "homedepot.com": "https://www.homedepot.com/s/{q}",
-    "lowes.com": "https://www.lowes.com/search?searchTerm={q}",
     "dell.com": "https://www.dell.com/en-us/search/{q}",
     "superbrightleds.com": "https://www.superbrightleds.com/catalogsearch/result/?q={q}",
 }
 # Big-box sitemaps are thousands of multi-MB files with no product ordering - site search only.
-SITEMAP_SKIP = {"homedepot.com", "lowes.com", "dell.com", "microcenter.com", "bhphotovideo.com", "walmart.com",
+SITEMAP_SKIP = {"homedepot.com", "dell.com", "microcenter.com", "walmart.com",
                 "target.com", "bestbuy.com", "amazon.com"}
 PRODUCT_PATH_HINT = {
-    "homedepot.com": "/p/", "lowes.com": "/pd/", "bhphotovideo.com": "/c/product/", "microcenter.com": "/product/",
+    "homedepot.com": "/p/", "microcenter.com": "/product/",
     "dell.com": "/apd/",
 }
 SEARCH_ENGINES = [

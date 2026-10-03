@@ -10,7 +10,6 @@ WHAT IT DOES
        VERIFICATION layer (prices read from the merchant itself)
          - your Master Sheet "Product URLs" (trusted CANDIDATES - validated against GTIN/MPN/title/specs,
            stale redirects detected)                                                  -> verified_direct
-         - Best Buy Products API (by SKU, UPC, model or keywords)        [BESTBUY_API_KEY, free] -> verified_direct
          - Shopify stores (auto-detected), retailer site search / sitemaps, DTC vendor sites
            (cached between runs, re-validated each run)                                   -> verified_discovered
          - Playwright browser render, only when a page's data is JavaScript-only (optional)
@@ -30,7 +29,11 @@ WHAT IT DOES
      verified history), market averages, verified-only history stats, the cheapest way to buy the
      Quantity Needed, and deals.
   6. Appends to "Run Data" and "Deals Data" (nothing else in the workbook is modified) and keeps a small
-     state folder (tracker_state/) with learned identifiers, discovery cache, offer history.
+     state folder (tracker_state/) with learned identifiers, discovery cache, offer history. Reputable used /
+     refurbished offers from PRIMARY vendors are listed in Deals Data too.
+  7. Self-improvement (pricetrack/learning.py): retailer yield (never-productive retailers are skipped), suggested
+     vendors (stats + the Domain to paste into the sheet), Master Sheet suggestions and identifiers learned from
+     verified pages - printed at the end of the run and saved to tracker_state/suggestions.md.
 
 TRUST RULES
   * Only verified (merchant page / official API), High-confidence, new, ordinary-priced listings feed the
@@ -70,8 +73,8 @@ import requests
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from pricetrack import pricing
-from pricetrack.adapters import (KNOWN_DOMAINS, AdapterContext, BestBuyAdapter, EbayAdapter, EbayClient,
+from pricetrack import learning, pricing
+from pricetrack.adapters import (KNOWN_DOMAINS, AdapterContext, EbayAdapter, EbayClient,
                                  ProductPageAdapter, RetailerDiscoveryAdapter, SerpApiAdapter, SerpApiClient,
                                  ShopifyAdapter, build_query, run_safely)
 from pricetrack.adapters.discovery import NO_CRAWL
@@ -101,6 +104,9 @@ MARKET_MIN_SAMPLE = 3
 USE_TARGET_RULE = False
 REQUIRE_AT_OR_BELOW_TARGET = False
 SNAPSHOT_DEALS = True             # Google Shopping rows may still be deals (labelled, ranked after verified ones)
+USED_PRIMARY_DEALS = True         # reputable used/refurbished offers from PRIMARY vendors (verified page, High) go to Deals Data
+USED_PRIMARY_MIN_SAVING = 0.05    # ... when they are at least this much below the new-condition reference price
+USED_PRIMARY_MAX = 3              # ... at most this many per item, on top of MAX_DEALS_PER_ITEM
 TRUST_LEGACY_BASELINES = False    # count pre-upgrade 'Product URLs' baselines as verified history?
 
 # ---- Noise / sanity filters -----------------------------------------------------------------------
@@ -122,6 +128,17 @@ LINKS_ENOUGH_VENDORS = 3          # 'Only Check Primary Links': this many VENDOR
 LINK_FALLBACK_VERIFY_MAX = 2      # 'Only Check Primary Links': same-vendor Google rows fetched on the merchant page per failed vendor
 LINK_FALLBACK_CACHE_DAYS = 30     # a replacement link that worked is tried again first (0 credits) for this long
 QUERY_INCLUDE_SPECS = True
+
+# ---- Self-improvement (pricetrack/learning.py; values are pushed there at start-up) -----------------------
+VENDOR_SKIP_ENABLED = True        # skip a retailer's site search once it has never produced a listing ...
+VENDOR_SKIP_MIN_ATTEMPTS = 8      # ... after this many attempts (item x run) ...
+VENDOR_SKIP_MIN_ITEMS = 3         # ... across at least this many different items
+VENDOR_RETRY_DAYS = 30            # a skipped retailer gets one probe again this long after its last attempt
+SUGGEST_MIN_HIGH = 3              # 'suggested vendor': High-confidence new listings seen (once per run x item) ...
+SUGGEST_MIN_ITEMS = 2             # ... for this many different items ...
+SUGGEST_MIN_RUNS = 2              # ... in this many different runs ...
+SUGGEST_MAX_PRICE_RATIO = 1.05    # ... with a best price within 5% of the verified price
+SUGGEST_IGNORE = {"bh", "bhphotovideo", "lowes"}   # vendor keys never to suggest (B&H / Lowe's were removed on purpose)
 
 # ---- Retrieval --------------------------------------------------------------------------------------
 WORKERS = 3                       # conservative parallelism (per-domain limits still apply)
@@ -175,8 +192,12 @@ def _push_settings() -> None:
     for name in ("DEAL_DISCOUNT", "TREND_MIN_DISCOUNT", "MARKET_MIN_SAMPLE", "USE_TARGET_RULE",
                  "REQUIRE_AT_OR_BELOW_TARGET", "SNAPSHOT_DEALS", "MIN_PRICE_RATIO_OF_TARGET", "OUTLIER_LOW",
                  "OUTLIER_HIGH", "MAX_DEALS_PER_ITEM", "ANCHOR_BAND_NEW", "ANCHOR_BAND_RESALE",
-                 "DEAL_MIN_CONFIDENCE", "OOS_COUNTS_FOR_BASELINE"):
+                 "DEAL_MIN_CONFIDENCE", "OOS_COUNTS_FOR_BASELINE", "USED_PRIMARY_DEALS", "USED_PRIMARY_MIN_SAVING",
+                 "USED_PRIMARY_MAX"):
         setattr(pricing, name, globals()[name])
+    for name in ("VENDOR_SKIP_ENABLED", "VENDOR_SKIP_MIN_ATTEMPTS", "VENDOR_SKIP_MIN_ITEMS", "VENDOR_RETRY_DAYS",
+                 "SUGGEST_MIN_HIGH", "SUGGEST_MIN_ITEMS", "SUGGEST_MIN_RUNS", "SUGGEST_MAX_PRICE_RATIO", "SUGGEST_IGNORE"):
+        setattr(learning, name, globals()[name])
 
 
 # =============================================================================
@@ -458,7 +479,7 @@ def product_url_phase(item: Item, ctx: Context) -> tuple:
         best, verdicts = None, []
         for l in res.listings:
             m = validate_page(item, l.title, l.gtins, l.mpns, brand_hint=l.brand, domain_brand=f"{l.vendor} {host}",
-                              slug=l.page_slug, pack_qty=l.pack_qty, color=l.color)
+                              slug=l.page_slug, pack_qty=l.pack_qty, color=l.color, host=host)
             verdicts.append(m)
             if m.confidence == "High" and (best is None or l.pack_qty < best[0].pack_qty):
                 best = (l, m)
@@ -489,12 +510,8 @@ def product_url_phase(item: Item, ctx: Context) -> tuple:
 
 
 def verification_phase(item: Item, ctx: Context, covered: set) -> list:
-    """Retailer adapters (identifier-first): Best Buy API, DTC + known-retailer discovery (cached)."""
-    a, jobs = ctx.args, []
-    bb = ctx.adapters["bestbuy"]
-    if "bestbuy.com" not in covered and bb.available()[0] and any(keys_match(v.key, "bestbuy") for v in ctx.primary):
-        bbv = next(v.name for v in ctx.primary if keys_match(v.key, "bestbuy"))
-        jobs.append(("bestbuy_api", "search", bb.search, (item, ctx.actx), {"vendor": bbv}))
+    """Retailer adapters (identifier-first): DTC + known-retailer discovery (cached)."""
+    a, jobs, skipped, retailer_dom = ctx.args, [], [], {}
     disc = ctx.adapters["discovery"]
     for v in ctx.primary:
         dom = host_of("https://" + v.domain) if v.domain else ""
@@ -504,8 +521,17 @@ def verification_phase(item: Item, ctx: Context, covered: set) -> list:
             if vendor_name_matches_product(v.name, item):
                 jobs.append(("discovered", v.name, disc.search, (item, ctx.actx), {"vendor": v, "allow_engines": True}))
         elif RETAILER_DISCOVERY and not a.no_discovery:
+            why = learning.vendor_skip_reason(ctx.state, dom)       # self-learned: this retailer has never delivered
+            if why:
+                skipped.append(SourceResult("discovered", v.name, Outcome.SKIPPED, why))
+                continue
+            retailer_dom[v.name] = dom
             jobs.append(("discovered", v.name, disc.search, (item, ctx.actx), {"vendor": v, "allow_engines": False}))
-    return _parallel(ctx, jobs)
+    results = _parallel(ctx, jobs)
+    for (_, target, *_rest), r in zip(jobs, results):               # teach the next run how well each retailer performs
+        if target in retailer_dom:
+            learning.record_vendor_attempt(ctx.state, retailer_dom[target], item.wid, ctx.run_id, r.outcome, len(r.listings))
+    return results + skipped
 
 
 def verify_snapshots(item: Item, ctx: Context, snaps: list, covered: set) -> list:
@@ -733,15 +759,21 @@ def process_item(item: Item, ctx: Context) -> tuple:
 
     # --- 2. Verification adapters (identifier-first, cached discovery) -------------------------------
     if links_only:
-        notes.append("Only Check Primary Links = Yes: vendor lists, retailer discovery, Best Buy keyword search and eBay skipped")
+        notes.append("Only Check Primary Links = Yes: vendor lists, retailer discovery and eBay skipped")
         results.append(SourceResult("search", "vendor lists + retailer discovery + eBay", Outcome.SKIPPED,
                                     "Only Check Primary Links = Yes"))
     elif not a.no_direct:
+        skipped_names = []
         for r in verification_phase(item, ctx, covered):
             results.append(r)
             listings += r.listings
             if r.outcome in (Outcome.SUCCESS, Outcome.UNAVAILABLE, Outcome.IDENTITY_MISMATCH, Outcome.PARSER):
                 notes.append(r.note()[:160])          # (no_match / skipped / blocked are summarised in Retrieval Outcomes)
+            elif r.outcome == Outcome.SKIPPED:
+                skipped_names.append(r.target)
+        if skipped_names:
+            notes.append(f"retailer search skipped (never produced a listing): {', '.join(skipped_names)}; "
+                         f"Google Shopping still covers them")
 
     # --- 3. Discovery / corroboration: SerpApi (optional, cached, policy-gated) ----------------------
     snaps, empty = [], []
@@ -786,6 +818,9 @@ def process_item(item: Item, ctx: Context) -> tuple:
     listings = listings + snaps + ebay_ls
 
     # --- 5. Score -> reconcile -> baselines -----------------------------------------------------------
+    for l in listings:                    # never leave a vendor blank: fall back to the listing's own link
+        if not (l.vendor or "").strip():
+            l.vendor = host_of(l.url) or "Unknown seller"
     dtc_keys = {v.key for v in ctx.primary if v.is_dtc} | {vendor_key(item_brand(item))}
     pricing.score_listings(item, listings, ctx.primary, ctx.secondary_keys)
     assign_ids(item, listings)
@@ -810,6 +845,13 @@ def process_item(item: Item, ctx: Context) -> tuple:
     res_trend = resale_trend(ctx.history, item.wid, ctx.now, ctx.run_id)
     deals = pricing.find_deals(item, listings, stats, hist, ref, baseline, pack_baselines, res_trend)
     plan = pricing.quantity_plan(item, listings)
+
+    # --- 5b. Self-improvement: remember identifiers, candidate vendors and Master Sheet suggestions ---
+    learned_v = learning.learn_from_listings(ctx.state, item, listings)
+    if learned_v:
+        notes.append("learned from verified pages: " + ", ".join(learned_v))
+    learning.record_vendor_candidates(ctx.state, item, listings, ctx.run_id, ctx.secondary_keys, baseline or ref[0])
+    learning.store_suggestions(ctx.state, item, learning.sheet_suggestions(item, listings, failed))
 
     # --- 6. History: offer change events + observations (idempotent per run id) ---------------------
     for l in listings:
@@ -870,7 +912,8 @@ def process_item(item: Item, ctx: Context) -> tuple:
     run_row = {
         "RowDateTime": ctx.now, "runID": ctx.run_id, "WishlistItem": item.wid, "Product": item.product,
         "Listings Searched": len(listings), "Matching Listings": sum(1 for l in listings if l.eligible),
-        "Unique Websites Searched": len({l.vkey for l in listings if l.vkey}),
+        "Unique Websites Searched": len({l.vkey for l in listings
+                                         if l.vkey and not l.vendor.startswith("Google Shopping (")}),
         "Target Price or better found": len(at_target),
         "Primary Vendor Price or Better": sum(1 for l in at_target if l.is_primary),
         "Deals found": len(deals), "Primary Vendor Deals": sum(1 for l in deals if l.is_primary),
@@ -905,7 +948,7 @@ def process_item(item: Item, ctx: Context) -> tuple:
             "Condition": l.condition, "Listed Price": l.price, "Pack Qty": l.pack_qty,
             "% Below Target": round((tgt - l.unit_price) / tgt, 4) if tgt else None,
             "Baseline Price": r, "% Below Baseline": round((r - l.unit_price) / r, 4) if r else None,
-            "Deal Rule": l.deal_rule, "Secondary Vendor?": "Yes" if l.is_resale else "No",
+            "Deal Rule": l.deal_rule, "Secondary Vendor?": "Yes" if (l.is_resale and not l.is_primary) else "No",
             "Secondary Vendor Comments": (l.seller_comment or "N/A (no seller rating available)") if l.is_resale else "",
             "In Stock Verified": stock_status(l), "Listing Title": l.title[:200],
             "Evidence": l.evidence, "Match Evidence": f"{l.match_evidence or 'title'}: {l.conf_reason}"[:200],
@@ -987,7 +1030,7 @@ def append_rows(ws, wanted: list, rows: list) -> None:
         r += 1
 
 
-def write_github_summary(outcomes: list, run_id: str) -> None:
+def write_github_summary(outcomes: list, run_id: str, report: Optional[list] = None) -> None:
     path = os.getenv("GITHUB_STEP_SUMMARY")
     if not path:
         return
@@ -1000,6 +1043,8 @@ def write_github_summary(outcomes: list, run_id: str) -> None:
         lines.append(f"| {item.product} | {f'${vb:,.2f}' if vb else '-'} | {f'${rp:,.2f}' if rp else '-'} | "
                      f"{len(deals)} ({new_ev}) | {(run_row.get('Best Qty Plan') or '-')[:80]} | "
                      f"{(run_row.get('Retrieval Outcomes') or '')[:120]} |")
+    if report:
+        lines += ["", "#### Self-improvement report", "", "```text", *report, "```"]
     try:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
@@ -1089,12 +1134,12 @@ def build_context(args, wb, run_id, now, history, state, session=None) -> Contex
     primary = load_primary_vendors(wb[SHEET_PRIMARY])
     browser = BrowserRenderer(enabled=(args.browser != "off"))
     fetcher = Fetcher(state.data, session=session or requests.Session(), browser=browser)
-    shopify, bestbuy = ShopifyAdapter(), BestBuyAdapter()
-    page = ProductPageAdapter(shopify=shopify, bestbuy=bestbuy if bestbuy.available()[0] else None)
+    shopify = ShopifyAdapter()
+    page = ProductPageAdapter(shopify=shopify)
     serp_client = SerpApiClient(os.getenv("SERPAPI_KEY"))
     ebay_client = EbayClient(os.getenv("EBAY_CLIENT_ID"), os.getenv("EBAY_CLIENT_SECRET"))
     serp_client.log = ebay_client.log = log
-    adapters = {"page": page, "shopify": shopify, "bestbuy": bestbuy,
+    adapters = {"page": page, "shopify": shopify,
                 "discovery": RetailerDiscoveryAdapter(page, shopify),
                 "serpapi": SerpApiAdapter(serp_client), "ebay": EbayAdapter(ebay_client)}
     actx = AdapterContext(fetcher=fetcher, state=state, primary=primary, log=log,
@@ -1137,8 +1182,6 @@ def main(argv=None) -> int:
         if serp.disabled:
             log("NOTE: SERPAPI_KEY is not set - Google Shopping discovery is OFF (optional; merchant pages/APIs still run).")
         serp.check_credits()
-    if not ctx.adapters["bestbuy"].available()[0]:
-        log(f"NOTE: Best Buy API off - {ctx.adapters['bestbuy'].available()[1]}")
     if not args.no_ebay and ctx.adapters["ebay"].client.disabled and any(i.open_used for i in todo):
         log("NOTE: eBay keys not set - eBay is optional and skipped.")
     if args.browser != "off" and not ctx.fetcher.browser.enabled:
@@ -1174,6 +1217,11 @@ def main(argv=None) -> int:
     finally:
         ctx.fetcher.browser and ctx.fetcher.browser.close()
 
+    report = learning.build_report(state, ctx.primary, ctx.secondary_keys, [o[0] for o in outcomes], run_id)
+    log("\n" + "=" * 78 + "\nSELF-IMPROVEMENT REPORT (suggestions only - nothing below is applied automatically)\n" + "=" * 78)
+    for line in report:
+        log(line)
+
     if args.dry_run:
         log("\nDry run: workbook and state NOT modified.")
     else:
@@ -1188,12 +1236,17 @@ def main(argv=None) -> int:
             wb.save(tmp)
             os.replace(tmp, path)
             state.save()
+            try:
+                state._atomic(state.folder / "suggestions.md",
+                              f"# Suggestions from run {run_id}\n\n```text\n" + "\n".join(report) + "\n```\n")
+            except OSError as e:
+                log(f"NOTE: could not write suggestions.md ({e})")
             log(f"\nSaved {len(outcomes)} Run Data rows and {sum(len(o[2]) for o in outcomes)} Deals Data rows; "
                 f"state in {state.folder}.")
         except Exception as e:
             log(f"FATAL: could not save workbook: {type(e).__name__}: {e}")
             return 2
-    write_github_summary(outcomes, run_id)
+    write_github_summary(outcomes, run_id, report)
     log(f"HTTP: {ctx.fetcher.stats}")
     return 0
 

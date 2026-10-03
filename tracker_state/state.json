@@ -1,26 +1,10 @@
 {
- "circuits": {
-  "bhphotovideo.com": {
-   "until": "2026-10-03T07:40:36",
-   "why": "site blocked automated access (HTTP 403)"
-  },
-  "lowes.com": {
-   "until": "2026-10-03T07:40:36",
-   "why": "site blocked automated access (HTTP 403)"
-  }
- },
+ "circuits": {},
  "discovery": {
   "1": {
    "product": "thirdreality smart plug gen3"
   },
   "2": {
-   "bhphotovideo.com": {
-    "detail": "no product page (site search: blocked)",
-    "item_id": "",
-    "ok": false,
-    "ts": "2026-10-03T01:38:30",
-    "url": ""
-   },
    "dell.com": {
     "detail": "no product page (site search: blocked)",
     "item_id": "",
@@ -30,13 +14,6 @@
    },
    "homedepot.com": {
     "detail": "no product page (site search: no links, no links)",
-    "item_id": "",
-    "ok": false,
-    "ts": "2026-10-03T01:38:30",
-    "url": ""
-   },
-   "lowes.com": {
-    "detail": "no product page (site search: blocked)",
     "item_id": "",
     "ok": false,
     "ts": "2026-10-03T01:38:30",
@@ -59,13 +36,6 @@
    }
   },
   "4": {
-   "bhphotovideo.com": {
-    "detail": "no product page (site search: blocked)",
-    "item_id": "",
-    "ok": false,
-    "ts": "2026-10-03T01:38:30",
-    "url": ""
-   },
    "dell.com": {
     "detail": "no product page (site search (model))",
     "item_id": "",
@@ -75,13 +45,6 @@
    },
    "homedepot.com": {
     "detail": "no product page (site search: no links, no links)",
-    "item_id": "",
-    "ok": false,
-    "ts": "2026-10-03T01:38:30",
-    "url": ""
-   },
-   "lowes.com": {
-    "detail": "no product page (site search: blocked)",
     "item_id": "",
     "ok": false,
     "ts": "2026-10-03T01:38:30",
@@ -104,13 +67,6 @@
    }
   },
   "5": {
-   "bhphotovideo.com": {
-    "detail": "no product page (site search: blocked)",
-    "item_id": "",
-    "ok": false,
-    "ts": "2026-10-03T01:38:30",
-    "url": ""
-   },
    "dell.com": {
     "detail": "no product page (site search (model))",
     "item_id": "",
@@ -120,13 +76,6 @@
    },
    "homedepot.com": {
     "detail": "no product page (site search: no links, no links)",
-    "item_id": "",
-    "ok": false,
-    "ts": "2026-10-03T01:38:30",
-    "url": ""
-   },
-   "lowes.com": {
-    "detail": "no product page (site search: blocked)",
     "item_id": "",
     "ok": false,
     "ts": "2026-10-03T01:38:30",
@@ -2974,13 +2923,11 @@
    "extractor": "JSON-LD",
    "ts": "2026-10-03T01:40:23"
   },
-  "bhphotovideo.com": {},
   "dell.com": {},
   "homedepot.com": {
    "client": "cffi",
    "ts": "2026-10-03T01:40:52"
   },
-  "lowes.com": {},
   "microcenter.com": {
    "client": "cffi",
    "extractor": "JSON-LD",
@@ -3011,5 +2958,8 @@
    "ts": "2026-10-03T01:38:33"
   }
  },
+ "suggestions": {},
+ "vendor_candidates": {},
+ "vendor_stats": {},
  "version": 1
 }

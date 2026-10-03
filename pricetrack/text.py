@@ -101,11 +101,11 @@ def detect_condition(title: str, hint: str = "") -> str:
 # ---- Vendor-name keys -----------------------------------------------------------------------------
 _VENDOR_STOP = {"the", "inc", "llc", "ltd", "co", "corp", "com", "net", "us", "usa", "official",
                 "store", "shop", "direct", "online", "seller", "from", "www"}
-_VENDOR_ALIASES = {"bhphotovideo": {"bh", "bhphoto"}}
+_VENDOR_ALIASES: dict = {}
 
 
 def vendor_key(name: str) -> str:
-    """'Amazon.com - Seller' -> 'amazon', 'The Home Depot' -> 'homedepot', "Lowe's" -> 'lowes'."""
+    """'Amazon.com - Seller' -> 'amazon', 'The Home Depot' -> 'homedepot'."""
     s = (name or "").lower().replace("&", "").replace("'", "").replace("’", "")
     s = re.sub(r"^from\s+", "", s)
     s = re.sub(r"^https?://", "", s)

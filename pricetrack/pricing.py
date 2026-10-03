@@ -44,6 +44,9 @@ RESALE_VS_NEW_DISCOUNT = 0.35
 USE_TARGET_RULE = False
 REQUIRE_AT_OR_BELOW_TARGET = False
 SNAPSHOT_DEALS = True            # market-snapshot rows may be deals, but are labelled and ranked last
+USED_PRIMARY_DEALS = True        # reputable used / refurbished offers from PRIMARY vendors always reach Deals Data ...
+USED_PRIMARY_MIN_SAVING = 0.05   # ... when they undercut the new-condition reference by at least this much
+USED_PRIMARY_MAX = 3             # ... at most this many per item (on top of MAX_DEALS_PER_ITEM)
 REF_LABELS = {"msrp_regular": "regular/MSRP", "regular_consensus": "regular-price consensus",
               "historical_verified": "verified history", "verified_current": "verified price",
               "verified_pack": "verified pack price", "market_average": "market avg (unverified)"}
@@ -98,7 +101,7 @@ def score_listings(item: Item, listings: list, primary: list, secondary_keys: li
         if l.from_url and l.evidence in VERIFIED:
             m = validate_page(item, l.title, l.gtins, l.mpns, brand_hint=l.brand,
                               domain_brand=f"{l.vendor} {host_of(l.url)}", slug=l.page_slug,
-                              pack_qty=l.pack_qty, color=l.color)
+                              pack_qty=l.pack_qty, color=l.color, host=host_of(l.url))
         else:
             m = classify(item, l.title, anchor, gtins=l.gtins, mpns=l.mpns, brand=l.brand, pack_qty=l.pack_qty,
                          color=l.color)
@@ -140,7 +143,7 @@ def verified_baseline(listings: list) -> tuple:
     singles_all = [l for l in pool if l.pack_qty == 1]
     use = singles_in or singles_all or in_stock or pool
     price = round(statistics.median(l.unit_price for l in use), 2)
-    tiers = sorted({f"{l.vendor} ({'API' if l.source in ('bestbuy_api', 'ebay') else 'page' if l.evidence == VERIFIED_DIRECT else 'discovered'})"
+    tiers = sorted({f"{l.vendor} ({'API' if l.source == 'ebay' else 'page' if l.evidence == VERIFIED_DIRECT else 'discovered'})"
                     for l in use})
     src = f"verified: {', '.join(tiers)} (median of {len(use)})"
     if not singles_in and singles_all:
@@ -350,4 +353,33 @@ def find_deals(item: Item, listings: list, stats: dict, hist: dict, reference: t
             deals.append(l)
     deals.sort(key=lambda l: (bool(l.conditional), l.evidence not in VERIFIED,
                               0 if (l.is_primary and not l.is_resale) else 1 if not l.is_resale else 2, l.unit_price))
-    return deals[:MAX_DEALS_PER_ITEM]
+    deals = deals[:MAX_DEALS_PER_ITEM]
+    return deals + used_primary_offers(item, listings, deals, ref_price or baseline, ref_type if ref_price else "verified_current")
+
+
+def used_primary_offers(item: Item, listings: list, deals: list, new_ref: Optional[float], ref_type: str) -> list:
+    """Reputable used / refurbished / open-box offers from a PRIMARY vendor (e.g. 'Best Buy, used, $160.99').
+    Reputable = priced on the vendor's own merchant page (verified evidence), High identity, in stock, ordinary
+    (non-conditional) price, a vendor on the Primary list, and cheaper than the new-condition reference.
+    They are listed in Deals Data whether or not a deal rule fired, labelled as used and as a primary-vendor offer."""
+    if not (USED_PRIMARY_DEALS and item.open_used and new_ref):
+        return []
+    have = {id(l) for l in deals}
+    out = []
+    for l in listings:
+        if (id(l) in have or l.condition not in ("used", "refurbished") or not l.is_primary
+                or l.evidence not in VERIFIED or l.confidence != DEAL_MIN_CONFIDENCE or not l.seller_ok
+                or l.in_stock is False or l.conditional or not l.reportable or l.pack_qty != 1):
+            continue
+        saving = (new_ref - l.unit_price) / new_ref
+        if saving < USED_PRIMARY_MIN_SAVING:
+            continue
+        l.ref_price, l.ref_type = new_ref, ref_type
+        l.deal_rule = (f"USED/REFURBISHED at primary vendor {l.vendor}: {saving:.0%} below new "
+                       f"{REF_LABELS.get(ref_type, ref_type)} ${new_ref:.2f} [verified on the vendor's page - check the condition grade]")
+        if not l.seller_comment:
+            l.seller_comment = (f"{l.condition.title()} / open-box offer sold by primary vendor {l.vendor} and verified on its "
+                                f"own product page; the vendor's return policy applies (not a marketplace seller)")
+        out.append(l)
+    out.sort(key=lambda l: l.unit_price)
+    return out[:USED_PRIMARY_MAX]

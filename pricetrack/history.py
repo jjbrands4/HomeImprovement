@@ -11,6 +11,9 @@ tracker_state/state.json        (small, rewritten atomically each run)
     strategies  per-domain client/extractor that worked last time
     circuits    per-domain cool-downs after repeated blocks
     offers      last known state of every stable offer id (price, stock, since) -> change events
+    vendor_stats       per retailer site: did its site search / crawl ever find the product (learning.py)
+    vendor_candidates  merchants outside the vendor lists that keep carrying the product at High confidence
+    suggestions        per item: Master Sheet fixes suggested by the last run
 tracker_state/observations.jsonl  one row per (run, item, offer) for trusted + candidate offers
 
 Idempotency: observation rows and offer states are keyed by run id, so re-running the same run id
@@ -73,7 +76,7 @@ class State:
             except (OSError, ValueError):
                 d = {}
         for k in ("identity", "discovery", "shopify", "serp_cache", "serp_last", "http_cache", "strategies",
-                  "circuits", "offers"):
+                  "circuits", "offers", "vendor_stats", "vendor_candidates", "suggestions"):
             d.setdefault(k, {})
         d["version"] = 1
         self.data = d

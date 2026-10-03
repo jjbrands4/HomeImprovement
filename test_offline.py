@@ -2,13 +2,13 @@
 """
 test_offline.py - verifies price_tracker.py + pricetrack/ end-to-end WITHOUT internet or API keys.
 
-A fake web (merchant pages, Shopify JSON, Best Buy API, SerpApi, eBay) is routed through the real
+A fake web (merchant pages, Shopify JSON, SerpApi, eBay) is routed through the real
 fetcher, adapters, matching, reconciliation, pricing, history and workbook writer. Checks cover:
   [1] identity: identifier-first matching, variant conflicts (region/generation/colour/voltage/size/
       accessory/bundle/sibling model), Product URL validation
   [2] URL normalisation, GTINs, structured-data extraction (all offers/variants, conditional prices)
   [3] resilient fetching: backoff/retry, 403 handling, circuit breaker, conditional GET cache
-  [4] adapters: Shopify variants, Best Buy identifier search, discovery cache, stale redirects,
+  [4] adapters: Shopify variants, discovery cache, stale redirects,
       browser last-resort fallback
   [5] pricing: quantity plan, reference-price hierarchy, conditional pricing kept out of averages
   [6] end-to-end runs: evidence tiers (aggregator fallback never verified), deals, provenance columns,
@@ -33,7 +33,7 @@ from openpyxl import load_workbook
 import price_tracker as pt
 import pricetrack.fetch as pfetch
 from pricetrack import identity as idn, pricing, reconcile
-from pricetrack.adapters import (AdapterContext, BestBuyAdapter, ProductPageAdapter, RetailerDiscoveryAdapter,
+from pricetrack.adapters import (AdapterContext, ProductPageAdapter, RetailerDiscoveryAdapter,
                                  ShopifyAdapter, parse_serpapi)
 from pricetrack.extract import extract_product
 from pricetrack.fetch import Fetcher
@@ -300,25 +300,6 @@ check("Shopify variant: id, pack, compare-at, barcode GTIN, availability",
       and l1.in_stock is False and l1.url.endswith("variant=11"))
 check("Shopify packs from option values", sorted(l.pack_qty_hint for l in r.listings) == [1, 2, 4])
 
-os.environ.pop("BESTBUY_API_KEY", None)
-bb_rows = {"upc=": Resp(200, {"products": []}),
-           "modelNumber=RAYG1US1BLK": Resp(200, {"products": [{"sku": 6506474, "name": "Sonos - Ray Soundbar - Black",
-                                                              "upc": "878269009993", "modelNumber": "RAYG1US1BLK",
-                                                              "salePrice": 179.0, "regularPrice": 219.0,
-                                                              "onlineAvailability": True, "freeShipping": True,
-                                                              "url": "https://www.bestbuy.com/site/x/6506474.p?skuId=6506474&cmp=RMX"}]})}
-web = Web(list(bb_rows.items()))
-bb = BestBuyAdapter(key="k")
-st = State(None)
-r = bb.search(sonos, actx(web, st))
-check("Best Buy API resolves by model number (not just SKU URLs)", r.ok if hasattr(r, "ok") else r.outcome == Outcome.SUCCESS and r.listings
-      and r.listings[0].price == 179.0, r.detail)
-lb = r.listings[0]
-check("Best Buy listing: regular price, free shipping, UPC, verified_direct",
-      lb.regular_price == 219.0 and lb.shipping == 0.0 and lb.gtins and lb.evidence == VERIFIED_DIRECT)
-check("Best Buy SKU cached for the next run", (st.discovery_get(sonos, "bestbuy.com") or {}).get("item_id") == "6506474")
-check("No BESTBUY_API_KEY -> api_unavailable outcome, no request", BestBuyAdapter(key="").search(sonos, actx(Web())).outcome == Outcome.API)
-
 # discovery: sitemap -> page, then cached URL reused without re-crawling
 sonos_v = Vendor("Sonos Direct", "sonos", True, "www.sonos.com")
 web = Web([("/products.json", Resp(404)), ("www.sonos.com/\x00", Resp(404)),
@@ -423,7 +404,7 @@ check("No verified offers -> trusted historical reference", ref3[0] == 205.0 and
 
 # ---------------------------------------------------------------------------
 print("\n[6] Reconciliation")
-ls = [L("Sonos Ray Soundbar Unmounted RAYG1US1BLK", 219.0, "Best Buy", src="bestbuy_api"),
+ls = [L("Sonos Ray Soundbar Unmounted RAYG1US1BLK", 219.0, "Best Buy", src="page"),
       L("Sonos Ray Soundbar Unmounted RAYG1US1BLK", 219.0, "Best Buy", ev=MARKET_SNAPSHOT, src="serpapi"),
       L("Sonos Ray Soundbar Unmounted", 219.0, "Target", ev=MARKET_SNAPSHOT, src="serpapi"),
       L("Sonos Ray Soundbar Unmounted", 219.0, "Walmart", ev=MARKET_SNAPSHOT, src="serpapi")]
@@ -449,8 +430,8 @@ print("\n[7] History: verified-only statistics, idempotent offer events")
 now = datetime(2026, 10, 1)
 rows = [{"wid": "3", "dt": now - timedelta(days=d), "run": f"r{d}", "baseline": v, "baseline_src": src}
         for d, v, src in ((25, 219.0, "verified: Sonos Direct (page) (median of 1)"),
-                          (15, 199.0, "verified: Sonos Direct (page), Best Buy (API) (median of 2)"),
-                          (6, 209.0, "verified: Best Buy (API) (median of 1)"),
+                          (15, 199.0, "verified: Sonos Direct (page), Best Buy (page) (median of 2)"),
+                          (6, 209.0, "verified: Best Buy (page) (median of 1)"),
                           (3, 99.0, "none (no verified merchant page/API priced the product)"),
                           (2, 150.0, "Product URLs: Sonos Direct (median of 1)"))]
 ser = verified_series(rows, 3)
@@ -579,7 +560,6 @@ pt.requests.Session = lambda: fake_web
 import pricetrack.adapters.serpapi as _ps, pricetrack.adapters.ebay as _pe   # noqa: E401
 _ps.requests.Session = _pe.requests.Session = lambda: fake_web
 os.environ.update({"SERPAPI_KEY": "dummy", "EBAY_CLIENT_ID": "dummy", "EBAY_CLIENT_SECRET": "dummy"})
-os.environ.pop("BESTBUY_API_KEY", None)
 
 wb8 = fx_dir / "run" / "Home Wishlist.xlsx"
 wb8.parent.mkdir()
@@ -655,6 +635,13 @@ check("Deals Data keeps its original 8 headers in place",
 state_dir = wb8.parent / "tracker_state"
 check("State folder written (state.json + observations.jsonl)",
       (state_dir / "state.json").exists() and (state_dir / "observations.jsonl").exists())
+sd = json.loads((state_dir / "state.json").read_text())
+check("State carries the self-improvement sections (retailer yield, vendor candidates, sheet suggestions)",
+      all(k in sd for k in ("vendor_stats", "vendor_candidates", "suggestions")) and sd["vendor_stats"]
+      and all(v["log"] for v in sd["vendor_stats"].values()), str(list(sd.get("vendor_stats", {}))))
+sug_md = (state_dir / "suggestions.md").read_text(encoding="utf-8") if (state_dir / "suggestions.md").exists() else ""
+check("suggestions.md is written with the three report sections",
+      "SUGGESTED VENDORS" in sug_md and "MASTER SHEET SUGGESTIONS" in sug_md and "RETAILER SEARCH YIELD" in sug_md)
 obs = [json.loads(x) for x in (state_dir / "observations.jsonl").read_text().splitlines()]
 check("Snapshot observations are never marked trusted", all(not o["trusted"] for o in obs if o["evidence"] == MARKET_SNAPSHOT) and
       any(o["trusted"] for o in obs))
@@ -747,6 +734,13 @@ check("search query: excluded phrases are never search words, only Google minus-
 check("same-vendor query appends the merchant name before the minus-terms",
       build_query(nova, negatives=True, vendor="Best Buy") == 'NovaWalk W50 TrekPad with 12% auto incline Best Buy -Lite -"Pro Max"')
 check("default query is unchanged when there are no exclusions", build_query(sonos) == "Sonos Ray Soundbar RAYG1US1BLK Unmounted")
+tr = mk_item("THIRDREALITY Smart Plug Gen3", "P1SPD1Z; P1SPD4Z")
+check("two MPNs in the cell (1-pack + 4-pack): a page carrying EITHER one is not a 'different variant'",
+      idn.conflicts(tr, "THIRDREALITY Smart Plug Gen3", mpns={"P1SPD1Z"}) is None
+      and idn.conflicts(tr, "THIRDREALITY Smart Plug Gen3", mpns={"P1SPD4Z"}) is None,
+      str(idn.conflicts(tr, "THIRDREALITY Smart Plug Gen3", mpns={"P1SPD1Z"})))
+check("...but a genuinely different near-code (P1SPD2Z) is still a variant conflict",
+      "different variant" in (idn.conflicts(tr, "THIRDREALITY Smart Plug Gen3", mpns={"P1SPD2Z"}) or ""))
 
 # ---- end-to-end: links-only items --------------------------------------------------------------------------
 fx10 = Path(tempfile.mkdtemp())
@@ -831,7 +825,6 @@ web10 = Web([
 ])
 pt.requests.Session = lambda: web10
 os.environ.update({"SERPAPI_KEY": "dummy"})
-os.environ.pop("BESTBUY_API_KEY", None)
 rc10 = pt.main(["--workbook", str(wb10), "--force", "--browser", "off", "--workers", "1", "--run-id", "links-1",
                 "--items", "11,12,13,15,16"])
 pt.requests.Session = _orig_session
@@ -926,10 +919,148 @@ check("'Yes' with no Product URLs falls back to the normal search and Run Data s
       str(r17))
 
 # ---------------------------------------------------------------------------
+print("\n[11] Brand-site trust, Google rows without a vendor, used primary offers, self-improvement")
+from pricetrack import learning
+from pricetrack.adapters.serpapi import parse_serpapi as _parse_serp
+
+sam = mk_item('Samsung 50” QN90F Neo QLED Mini LED 4K UHD TV', "QN50QN90FAFXZA", specs="50 inch")
+sam.brand = "Samsung"
+t_sam = 'Samsung 50" Class QN90F Neo QLED 4K Smart TV (2025)'
+m_other = idn.validate_page(sam, t_sam, set(), set(), domain_brand="Best Buy bestbuy.com", host="bestbuy.com")
+m_brand = idn.validate_page(sam, t_sam, set(), set(), domain_brand="Samsung samsung.com", host="samsung.com")
+check("a retailer page that is only 'name-ish' stays Medium", m_other.confidence == "Medium", str(m_other))
+check("the SAME page on the brand's own site (brand = domain, no conflicts) is High", m_brand.confidence == "High" and m_brand.evidence == "brand_site", str(m_brand))
+check("brand-site trust never overrides a hard conflict (55\" page on samsung.com stays Low)",
+      idn.validate_page(sam, 'Samsung 55" Class QN90F Neo QLED 4K', set(), set(), domain_brand="Samsung samsung.com", host="samsung.com").confidence == "Low")
+nb = mk_item("Kipp Glass Table Lamp - Walnut")
+check("brand-site trust needs the Brand to be known (the first word of the name is not trusted)",
+      not idn.brand_owns_domain(nb, "kipp.com") and idn.brand_owns_domain(sam, "www.samsung.com"))
+govee = mk_item("Govee COB LED Strip Lights 2 Pro 16.4ft", "H1AA5", specs="COB; 16.4 ft")
+check("'16.4ft' in the name matches both '16.4ft' and '16.4 ft' titles",
+      idn.classify(govee, "Govee COB LED Strip Lights 2 Pro, 16.4ft RGBWWIC").confidence == "High"
+      and idn.classify(govee, "Govee COB LED Strip Lights 2 Pro 16.4 ft").confidence == "High")
+
+rows = [{"title": "Sonos Ray Black Soundbar", "extracted_price": 280, "price": "CA$280+", "multiple_sources": True, "product_id": "111"},
+        {"title": "Sonos Ray Soundbar (Black)", "extracted_price": 210, "price": "$210+", "multiple_sources": True, "product_id": "222"},
+        {"title": "Sonos Ray Soundbar", "extracted_price": 219, "price": "$219.00", "link": "https://www.crutchfield.com/p_1/Ray.html"},
+        {"title": "Sonos Ray Soundbar", "extracted_price": 205, "price": "€205", "source": "Shop EU", "link": "https://shop.example.eu/x"}]
+ps = _parse_serp(rows)
+check("Google rows in another currency (CA$, EUR ...) are dropped, never read as USD", len(ps) == 2 and all(l.price in (210.0, 219.0) for l in ps), str([(l.vendor, l.price) for l in ps]))
+sev = next(l for l in ps if l.price == 210.0)
+check("a product-level row with no merchant is labelled and keeps a Google product link (never a blank vendor)",
+      sev.vendor == "Google Shopping (several sellers)" and sev.url.startswith("https://www.google.com/shopping/product/222")
+      and "several sellers" in sev.seller_comment, f"{sev.vendor} {sev.url}")
+check("a row with no source name but a merchant link shows the link's host as the vendor",
+      next(l for l in ps if l.price == 219.0).vendor == "crutchfield.com")
+
+# ---- used / refurbished offers from PRIMARY vendors reach Deals Data -------------------------------------------------
+sonos_u = mk_item("Sonos Ray Soundbar", "RAYG1US1BLK", open_used=True, target=175)
+prim_u = [Vendor("Sonos Direct", "sonos", True, "sonos.com"), Vendor("Best Buy", "bestbuy")]
+def used_case(price_used, vendor="Best Buy", ev=VERIFIED_DIRECT, stock=True, open_used=True, cond="used"):
+    it = mk_item("Sonos Ray Soundbar", "RAYG1US1BLK", open_used=open_used, target=175)
+    new = L("Sonos Ray Soundbar RAYG1US1BLK", 219.0, "Sonos Direct")
+    old = L("Sonos Ray Soundbar RAYG1US1BLK Open-Box", price_used, vendor, ev=ev, stock=stock)
+    old.condition = cond
+    ls = [new, old]
+    pricing.score_listings(it, ls, prim_u, ["ebay"])
+    reconcile.assign_ids(it, ls)
+    stats = pricing.market_stats(ls)
+    base, _, packs = pricing.verified_baseline(ls)
+    ref = pricing.reference_price(it, ls, {}, {"sonos"})
+    return old, pricing.find_deals(it, ls, stats, {}, ref, base, packs, None)
+old, d = used_case(160.99)
+check("used offer from a primary vendor (verified page, High) is listed in Deals Data with its own rule text",
+      old in d and "USED/REFURBISHED at primary vendor Best Buy" in old.deal_rule and "26%" in old.deal_rule, old.deal_rule)
+check("...and carries a seller comment instead of 'N/A'", "primary vendor Best Buy" in old.seller_comment)
+check("used offer only 2% below new is NOT listed", used_case(214.0)[0] not in used_case(214.0)[1])
+check("used offer from a vendor that is not primary is not auto-listed", used_case(160.99, vendor="Random Reseller")[0] not in used_case(160.99, vendor="Random Reseller")[1])
+check("used offer that is out of stock is not listed", used_case(160.99, stock=False)[0] not in used_case(160.99, stock=False)[1])
+check("Google-only (market_snapshot) used rows are not auto-listed", used_case(160.99, ev=MARKET_SNAPSHOT)[0] not in used_case(160.99, ev=MARKET_SNAPSHOT)[1])
+check("not open to used -> never listed", used_case(160.99, open_used=False)[0] not in used_case(160.99, open_used=False)[1])
+check("refurbished counts as used", used_case(170.0, cond="refurbished")[0] in used_case(170.0, cond="refurbished")[1])
+
+# ---- self-improvement: retailer yield --------------------------------------------------------------------------------
+st = State(None)
+for i, w in enumerate(["1", "2", "3", "1", "2", "3", "1", "2"]):
+    check_ok = learning.vendor_skip_reason(st, "dell.com") == ""
+    learning.record_vendor_attempt(st, "dell.com", w, f"run{i}", Outcome.NO_MATCH, 0)
+check("retailer is searched until the evidence is in (8 attempts, 3 items)", check_ok)
+why = learning.vendor_skip_reason(st, "dell.com")
+check("a retailer that never produced a listing in 8 attempts / 3 items is skipped, with the reason and retry date",
+      "no yield" in why and "8 attempts" in why and "3 items" in why and "skipped until" in why, why)
+learning.record_vendor_attempt(st, "homedepot.com", "1", "r", Outcome.SUCCESS, 1)
+for i in range(10):
+    learning.record_vendor_attempt(st, "homedepot.com", str(i % 4), f"x{i}", Outcome.NO_MATCH, 0)
+check("a retailer that has EVER delivered a listing is never skipped", learning.vendor_skip_reason(st, "homedepot.com") == "")
+learning.record_vendor_attempt(st, "dell.com", "1", "run0", Outcome.NO_MATCH, 0)
+check("attempts are idempotent per (run, item)", len(st.data["vendor_stats"]["dell.com"]["log"]) == 8)
+learning.record_vendor_attempt(st, "newsite.com", "1", "r", Outcome.NETWORK, 0)
+check("network errors / skips are not evidence about a retailer", "newsite.com" not in st.data["vendor_stats"])
+st.data["vendor_stats"]["dell.com"]["last_try"] = (st.now - timedelta(days=31)).isoformat()
+check("after the retry window the retailer is probed again", learning.vendor_skip_reason(st, "dell.com") == "")
+
+# ---- self-improvement: suggested vendors -----------------------------------------------------------------------------
+st = State(None)
+prim_s = [Vendor("Sonos Direct", "sonos", True, "sonos.com")]
+def seen(wid, run, price, vendor="Newegg.com - Walts TV", url="", ref=219.0, conf_title="Sonos Ray Soundbar RAYG1US1BLK"):
+    it = mk_item("Sonos Ray Soundbar", "RAYG1US1BLK", wid=wid, open_used=True)
+    l = L(conf_title, price, vendor, ev=MARKET_SNAPSHOT, src="serpapi")
+    l.url = url or "https://www.google.com/shopping/product/123"
+    pricing.score_listings(it, [l], prim_s, ["ebay"])
+    l.eligible = True
+    learning.record_vendor_candidates(st, it, [l], run, ["ebay"], ref)
+seen(1, "r1", 214.0)
+seen(2, "r1", 215.0)
+q, w = learning.candidate_report(st, prim_s, ["ebay"])
+check("one run is not enough to qualify (it is 'watching', with what is missing)",
+      not q and w and w[0]["name"] == "Newegg.com" and w[0]["marketplace"] and "2+ runs" in str(w[0]["criteria"]) , str(w))
+seen(1, "r2", 213.0, url="https://www.newegg.com/p/123")
+q, w = learning.candidate_report(st, prim_s, ["ebay"])
+check("3 High listings, 2 items, 2 runs, competitive price -> qualified, with the Domain to paste into the sheet",
+      len(q) == 1 and q[0]["domain"] == "newegg.com" and q[0]["domain_how"] == "merchant link" and q[0]["high"] == 3 and q[0]["items"] == 2, str(q))
+seen(1, "r3", 400.0, vendor="Pricey Shop")
+seen(2, "r3", 400.0, vendor="Pricey Shop")
+seen(1, "r4", 400.0, vendor="Pricey Shop")
+seen(2, "r4", 400.0, vendor="Pricey Shop")
+q, w = learning.candidate_report(st, prim_s, ["ebay"])
+check("B&H and Lowe's (removed from the search on purpose) are never suggested back",
+      {"bh", "bhphotovideo", "lowes"} <= set(pt.SUGGEST_IGNORE))
+check("a vendor far above the verified price does not qualify", all(c["name"] != "Pricey Shop" for c in q))
+q, w = learning.candidate_report(st, [Vendor("Newegg", "newegg")], ["ebay"])
+check("vendors already on the Primary list are never suggested", all(c["key"] != "newegg" for c in q + w))
+rep = "\n".join(learning.build_report(st, prim_s, ["ebay"], [], "r4"))
+check("end-of-run report lists the vendor, its stats and the sheet row to add",
+      "Vendor = Newegg.com | isDirectToConsumer = 0 | Domain = newegg.com" in rep and "3 High-confidence listings across 2 item(s)" in rep, rep)
+
+# ---- self-improvement: Master Sheet suggestions + learned identity ----------------------------------------------------
+ff = mk_item('Govee COB LED Strip Lights 2 Pro 16.4"', "", specs="COB; 16.4 ft")
+page_l = L("Govee COB LED Strip Lights 2 Pro 16.4ft", 169.99, "Govee")
+page_l.gtins, page_l.mpns, page_l.brand, page_l.confidence = {"00810172723184"}, {"H1AA5"}, "Govee", "High"
+sug = learning.sheet_suggestions(ff, [page_l], [])
+check("suggests the GTIN, MPN and Brand the verified page reports (UPC-A zero padded)",
+      any("GTIN/UPC is blank" in x and "810172723184" in x for x in sug) and any("MPN/Model is blank" in x and "H1AA5" in x for x in sug)
+      and any("Brand is blank" in x and "Govee" in x for x in sug), str(sug))
+check("flags the 16.4\" vs 16.4 ft slip in the name", any('says 16.4"' in x and "16.4ft" in x for x in sug), str(sug))
+sam2 = mk_item("Samsung 50 QN90F Neo QLED Mini LED 4K UHD TV")
+pg = L("Samsung 50 Class QN90F Neo QLED 4K Smart TV", 1097.99, "Samsung")
+pg.confidence = "High"
+check("flags name words that no verified page title contains (the 'Mini LED' case)",
+      any("'mini'" in x and "'uhd'" in x for x in learning.sheet_suggestions(sam2, [pg], [])), str(learning.sheet_suggestions(sam2, [pg], [])))
+st = State(None)
+sam3 = mk_item("Samsung 50 QN90F TV")
+pg2 = L("Samsung 50 Class QN90F TV", 1097.99, "Samsung")
+pg2.confidence, pg2.gtins, pg2.mpns, pg2.brand = "High", {"00887276934532"}, {"QN50QN90FAFXZA"}, "Samsung"
+new = learning.learn_from_listings(st, sam3, [pg2])
+check("verified High single-unit pages teach the item's GTIN / MPN / brand",
+      any("GTIN 887276934532" in x for x in new) and any("MPN QN50QN90FAFXZA" in x for x in new) and sam3.learned_brand == "Samsung", str(new))
+pg3 = L("Samsung 50 Class QN90F TV", 1.0, "Eshop", ev=MARKET_SNAPSHOT, src="serpapi")
+pg3.confidence, pg3.mpns = "High", {"ZZZ99999"}
+check("market snapshots and Medium pages never teach identifiers", learning.learn_from_listings(st, sam3, [pg3]) == [])
+
 print("\n[9] No keys + no network: must not crash, must still log rows")
 tmp2 = Path(tempfile.mkdtemp()) / "Home Wishlist.xlsx"
 shutil.copy(FIXTURE, tmp2)
-env = {k: v for k, v in os.environ.items() if k not in ("SERPAPI_KEY", "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET", "BESTBUY_API_KEY")}
+env = {k: v for k, v in os.environ.items() if k not in ("SERPAPI_KEY", "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET")}
 proc = subprocess.run([sys.executable, "price_tracker.py", "--workbook", str(tmp2), "--force", "--no-direct", "--browser", "off"],
                       env=env, capture_output=True, text=True, timeout=300)
 check("exit code 0 with no keys", proc.returncode == 0, proc.stderr[-400:])

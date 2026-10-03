@@ -51,12 +51,12 @@ API_TIMEOUT = 20
 MAX_RETRIES = 2                  # extra attempts after the first
 BACKOFF_BASE, BACKOFF_CAP = 1.5, 20.0
 DOMAIN_MIN_INTERVAL = 2.0        # seconds between requests to the same retail domain
-API_MIN_INTERVAL = 0.25          # official APIs (Best Buy 5 req/s, eBay, SerpApi)
+API_MIN_INTERVAL = 0.25          # official APIs (eBay, SerpApi)
 CIRCUIT_THRESHOLD = 3            # consecutive blocks/failures that open a domain's circuit
 CIRCUIT_COOLDOWN_HOURS = 6       # persisted cool-down after a run ended with the circuit open on blocks
 HTTP_CACHE_MAX = 400             # cached parsed responses kept in the state file
 BLOCK_STATUSES = {202, 401, 403, 429, 503}
-API_HOSTS = ("api.bestbuy.com", "api.ebay.com", "serpapi.com")
+API_HOSTS = ("api.ebay.com", "serpapi.com")
 
 
 @dataclass

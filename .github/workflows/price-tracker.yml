@@ -6,7 +6,7 @@
 # repo root, so it is inactive until you move it there.
 #
 # Optional repository secrets (Settings > Secrets and variables > Actions):
-#   BESTBUY_API_KEY (free), SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+#   SERPAPI_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
 # Missing/invalid secrets never fail the run - that source is logged as api_unavailable.
 # =============================================================================
 name: Price Tracker
@@ -86,7 +86,6 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
-          BESTBUY_API_KEY: ${{ secrets.BESTBUY_API_KEY }}   # optional: most reliable Best Buy prices
           # Re-running this workflow run replaces its own rows instead of duplicating them (idempotent).
           PRICE_TRACKER_RUN_ID: gh-${{ github.run_id }}
           # Manual-run inputs are passed via env vars (not pasted into the script) to avoid shell injection.

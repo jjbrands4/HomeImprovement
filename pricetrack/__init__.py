@@ -9,11 +9,13 @@ Module map (each one is importable and testable on its own):
   extract    - structured-data extraction (JSON-LD > microdata > OpenGraph > hydration JSON > DOM)
   fetch      - resilient HTTP: retries w/ backoff+jitter, per-domain rate limits, circuit breaker,
                conditional GET cache, curl_cffi + Playwright fallbacks, outcome classification
-  adapters   - SourceAdapter implementations (product page, Shopify, Best Buy API, retailer
+  adapters   - SourceAdapter implementations (product page, Shopify, retailer
                sitemap/site-search, browser, SerpApi, eBay)
   reconcile  - stable offer ids, cross-source corroboration, promotion of uncertain listings
   pricing    - effective price, conditional pricing, reference-price hierarchy, market stats,
                quantity-aware pack optimisation, deal rules
+  learning   - what a run teaches the next one: retailer yield, suggested vendors, Master Sheet suggestions,
+               identifiers learned from verified pages
   history    - persistent state (discovery cache, learned identities, offer state, observations),
                verified-only historical statistics, price-change events, idempotent re-runs
 
@@ -26,4 +28,4 @@ Design notes borrowed (concepts only) from established open-source projects:
   * Apprise - pluggable adapter registry where a missing/failed plugin never breaks the others
 """
 
-__all__ = ["models", "urls", "identity", "extract", "fetch", "adapters", "reconcile", "pricing", "history"]
+__all__ = ["models", "urls", "identity", "extract", "fetch", "adapters", "reconcile", "pricing", "history", "learning"]

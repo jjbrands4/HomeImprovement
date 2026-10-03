@@ -3,7 +3,7 @@ Product / offer reconciliation.
 
   offer id     merchant + merchant item id (or canonical URL) + condition + variant + pack
                -> stable across runs; two listings are NEVER merged just because the price is equal
-  duplicates   the same offer seen through several sources (Product URL page, Best Buy API, Google
+  duplicates   the same offer seen through several sources (Product URL page, Google
                Shopping row ...) collapses to the most authoritative copy, and the others are kept as
                corroboration metadata ("corroborated_by")
   promotion    a Medium listing becomes High only when independent evidence agrees on identity and

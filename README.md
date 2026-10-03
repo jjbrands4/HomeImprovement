@@ -18,12 +18,12 @@ python test_offline.py                         # offline test-suite (no network,
 
 | Layer | Sources | Evidence tier |
 |---|---|---|
-| Verification | Master Sheet **Product URLs** (validated, never blindly trusted), Best Buy Products API, eBay Browse API | `verified_direct` |
+| Verification | Master Sheet **Product URLs** (validated, never blindly trusted), eBay Browse API | `verified_direct` |
 | Verification | Merchant pages the tracker found itself: Shopify stores (auto-detected), retailer site search / sitemaps, DTC vendor sites, merchant links found in Google Shopping | `verified_discovered` |
 | Discovery / corroboration | Google Shopping via SerpApi | `market_snapshot` |
 
 * **Identifier-first matching**: GTIN/UPC/EAN > MPN/SKU/model > page metadata > title/specs. Identifiers are
-  extracted automatically (JSON-LD, microdata, Shopify barcodes, Best Buy UPC/model, GTINs in URLs) and remembered
+  extracted automatically (JSON-LD, microdata, Shopify barcodes, GTINs in URLs) and remembered
   in `tracker_state/`. Optional Master Sheet columns `GTIN`/`UPC`, `MPN`/`Model`, `Brand` are used when present.
 * **Hard conflicts** make a listing Low no matter how good its title looks: different GTIN, near-variant model code
   (e.g. `RAYG1US1BLK` vs `RAYG1EU1BLK`), region/voltage, generation, colour, size, accessory, bundle, configuration
@@ -54,7 +54,7 @@ python test_offline.py                         # offline test-suite (no network,
   Put only attributes a title will actually contain (`Black`, `50 inch`); a bare `50 in` is read as `50 inch`, and
   synonyms (`50 in; 50 inch; 50"`) collapse into one. Setup context ("Unmounted") belongs in Notes.
 * **Only Check Primary Links** (`Yes` / `No`) - `Yes` prices the item from its **Product URLs**. The Primary and
-  Secondary vendor lists, retailer discovery, Best Buy keyword search and eBay are skipped, and the vendors of the
+  Secondary vendor lists, retailer discovery and eBay are skipped, and the vendors of the
   item's own links count as its primary vendors (so a deal at e.g. Article or Etsy is reported; only the listing's own
   condition makes it resale). How much SerpApi searching follows depends on how many **vendors** have a working link
   (`LINKS_ENOUGH_VENDORS = 3`):
@@ -87,14 +87,49 @@ spends no credits), offer states and `observations.jsonl`. Unchanged offers are 
 as new price events. Re-using a run id (`--run-id`, or `PRICE_TRACKER_RUN_ID` – the workflow uses the GitHub run id)
 replaces that run's rows instead of duplicating them. URLs are stored without tracking parameters.
 
+### Used / refurbished offers from primary vendors
+A used, refurbished or open-box offer from a **Primary** vendor (e.g. *Best Buy, used, $160.99*) is always listed in
+**Deals Data** - even when no deal rule fired - when it is *reputable*: priced on the vendor's own merchant page
+(verified evidence, not a Google row), High identity, in stock, ordinary price, single unit, the item is "Open to used",
+and it is at least 5% (`USED_PRIMARY_MIN_SAVING`) below the new-condition reference price (max 3 per item,
+`USED_PRIMARY_MAX`). Its Deal Rule says "USED/REFURBISHED at primary vendor ...", and it is *not* marked as a
+secondary vendor.
+
+### Trust rules added from run data
+* **Brand = domain**: a Product URL page on the brand's own site (Brand filled in, e.g. `samsung.com` for a Samsung TV)
+  that no hard conflict contradicts (model code, size, colour, pack ...) is **High** even if its title omits words from
+  your product name. The same page on a retailer still needs the usual evidence.
+* **Google rows**: prices in another currency (`CA$280+`, EUR ...) are dropped. A row without a merchant name shows the
+  merchant link's domain; a product-level "several sellers from $X" row is labelled `Google Shopping (several sellers)`
+  and links to Google's product page. A vendor is never left blank.
+
+### Self-improvement (`pricetrack/learning.py`)
+Every run teaches the next one - no extra requests or SerpApi credits. All of it is stored in `tracker_state/state.json`;
+the end of every run prints a **SELF-IMPROVEMENT REPORT** (also saved as `tracker_state/suggestions.md` and in the GitHub
+job summary). Nothing in it is applied automatically.
+* **Retailer yield**: each retailer's site search / crawl is scored per item and run. One that has *never* produced a
+  listing after 8 attempts across 3 items is skipped (Run Data notes say so; Google Shopping still covers it) and probed
+  once every 30 days. A retailer that has ever delivered is never skipped. (`VENDOR_*` settings)
+* **Suggested vendors**: merchants on neither vendor list that show up with High-confidence new listings in 3+ listings,
+  2+ items, 2+ runs and within 5% of the verified price are listed with their stats and the exact row to add
+  (Vendor / isDirectToConsumer / Domain). Marketplace sellers ("Newegg.com - Shop") are reported as the marketplace. The
+  domain comes from a merchant link, else the vendor name, else a labelled guess to confirm. (`SUGGEST_*` settings;
+  `SUGGEST_IGNORE` silences a vendor.)
+* **Master Sheet suggestions** (per item): GTIN / MPN / Brand the verified pages report but your row lacks, name or spec
+  words that no verified page title contains (what holds a page at Medium), unit slips such as `16.4"` vs `16.4 ft`,
+  failed or Medium-confidence Product URLs, and vendors that appear only through Google and would be verified by a
+  Product URL.
+* **Learned identity**: GTIN / MPN / brand of verified, High-confidence, single-unit pages are remembered per item, so
+  the next run matches those pages by identifier.
+
 ### Keys (all optional, all free tiers)
-`BESTBUY_API_KEY` (developer.bestbuy.com), `SERPAPI_KEY` (Google Shopping discovery – skipped automatically when
+`SERPAPI_KEY` (Google Shopping discovery – skipped automatically when
 verified pages already price an item and discovery ran within 6 days), `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET`
 (eBay stays optional; without it the tracker runs normally). Put them in `.env` locally or in repository secrets.
 
 ### Code layout
 `price_tracker.py` (settings, workbook I/O, orchestration) and `pricetrack/`: `identity.py`, `extract.py`,
-`fetch.py`, `adapters/` (page, shopify, bestbuy, discovery, serpapi, ebay), `reconcile.py`, `pricing.py`,
+`fetch.py`, `adapters/` (page, shopify, discovery, serpapi, ebay), `reconcile.py`, `pricing.py`,
 `history.py`, `urls.py`, `text.py`, `models.py`.
 
 The GitHub Actions workflow is stored in the root file `workflows`; GitHub only runs it from

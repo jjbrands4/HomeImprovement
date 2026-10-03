@@ -65,9 +65,7 @@ _ITEM_ID_PATTERNS = [
     ("walmart.com", re.compile(r"/ip/(?:[^/]+/)?(\d{6,})")),
     ("target.com", re.compile(r"/A-(\d{6,})")),
     ("homedepot.com", re.compile(r"/p/(?:[^/]+/)?(\d{9})")),
-    ("lowes.com", re.compile(r"/pd/[^/]+/(\d{6,})")),
     ("dell.com", re.compile(r"/apd/([a-z0-9-]{5,})", re.I)),
-    ("bhphotovideo.com", re.compile(r"/c/product/(\d+-[A-Z]+)", re.I)),
     ("microcenter.com", re.compile(r"/product/(\d{6,})")),
     ("ebay.com", re.compile(r"/itm/(?:[^/]+/)?(\d{9,})")),
 ]

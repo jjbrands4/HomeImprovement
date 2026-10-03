@@ -100,7 +100,7 @@ class Listing:
     url: str
     price: float                       # current listed price for this listing (may be a multi-pack)
     vendor: str
-    source: str                        # adapter: page | shopify | bestbuy_api | discovered | browser | serpapi | ebay
+    source: str                        # adapter: page | shopify | discovered | browser | serpapi | ebay
     condition: str = "new"
     in_stock: Optional[bool] = None    # None = unknown
     seller_comment: str = ""
@@ -121,7 +121,7 @@ class Listing:
     color: str = ""
     conditional: str = ""                    # coupon | membership | subscription | financing | trade_in | ...
     conditional_detail: str = ""
-    method: str = ""                         # extraction method (JSON-LD, Shopify .js, Best Buy API ...)
+    method: str = ""                         # extraction method (JSON-LD, Shopify .js ...)
     retrieved_at: Optional[datetime] = None
     alt_url: str = ""                        # e.g. the Google Shopping link a snapshot came from
     page_slug: str = ""                      # words from the final page URL path (identity validation)
@@ -134,7 +134,7 @@ class Listing:
     is_resale: bool = False
     confidence: str = "Low"
     conf_reason: str = ""
-    match_evidence: str = ""                 # gtin | mpn | page_metadata | title | corroborated | product_url
+    match_evidence: str = ""                 # gtin | mpn | page_metadata | title | corroborated | product_url | brand_site
     eligible: bool = False                   # counts toward market averages
     reportable: bool = False                 # may be reported as a deal / target hit
     trusted: bool = False                    # may feed verified baselines / history

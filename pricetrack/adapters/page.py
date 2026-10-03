@@ -21,24 +21,15 @@ class ProductPageAdapter(SourceAdapter):
     name = "page"
     evidence = VERIFIED_DIRECT
 
-    def __init__(self, shopify=None, bestbuy=None):
+    def __init__(self, shopify=None):
         self.shopify = shopify
-        self.bestbuy = bestbuy
 
     def fetch(self, url: str, item: Item, ctx: AdapterContext, vendor: str = "", evidence: str = VERIFIED_DIRECT,
               allow_browser: bool = True, **kw) -> SourceResult:
         nurl = normalize_url(url)
         host = host_of(nurl)
         tag = host or url[:40]
-        # 1) official merchant API (Best Buy) beats scraping the same page
-        if self.bestbuy and "bestbuy.com" in host:
-            r = self.bestbuy.fetch(nurl, item, ctx, vendor=vendor)
-            if r.listings:
-                return r
-            api_note = r.detail
-        else:
-            api_note = ""
-        # 2) Shopify product JSON (every variant / pack size with its own price + stock)
+        # 1) Shopify product JSON (every variant / pack size with its own price + stock)
         handle = shopify_handle(nurl)
         if self.shopify and handle:
             base = f"{urlparse(nurl).scheme}://{urlparse(nurl).netloc}"
@@ -46,7 +37,7 @@ class ProductPageAdapter(SourceAdapter):
                                      variant=shopify_variant(nurl))
             if r.listings:
                 return r
-        # 3) the page itself
+        # 2) the page itself
         f = ctx.fetcher
         res = f.get(nurl, conditional=True)
         page, how = None, ""
@@ -64,7 +55,7 @@ class ProductPageAdapter(SourceAdapter):
             if looks_like_listing_page(final) or (not (page and page.offers) and overlap < 0.3):
                 return SourceResult(self.name, tag, Outcome.IDENTITY_MISMATCH,
                                     f"stale link: redirected to a non-product page ({final[:90]})")
-        # 4) last resort: browser render when HTTP could not expose product data
+        # 3) last resort: browser render when HTTP could not expose product data
         need_render = (res.ok and not (page and page.offers) and looks_js_rendered(res.text)) or \
                       (res.ok and not (page and page.offers)) or res.outcome == Outcome.BLOCKED
         if need_render and allow_browser and not ctx.no_browser and f.browser and f.browser.enabled:
@@ -78,8 +69,7 @@ class ProductPageAdapter(SourceAdapter):
             elif not res.ok:
                 res.detail = f"{res.detail}; browser: {rr.detail}"
         if not res.ok and not (page and page.offers):
-            extra = f" | Best Buy API: {api_note}" if api_note else ""
-            return SourceResult(self.name, tag, res.outcome, res.detail + extra)
+            return SourceResult(self.name, tag, res.outcome, res.detail)
         if not page or not page.offers:
             why = "no price data on page"
             if res.ok and looks_js_rendered(res.text):
