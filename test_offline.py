@@ -13,6 +13,8 @@ fetcher, adapters, matching, reconciliation, pricing, history and workbook write
   [5] pricing: quantity plan, reference-price hierarchy, conditional pricing kept out of averages
   [6] end-to-end runs: evidence tiers (aggregator fallback never verified), deals, provenance columns,
       offer change events, idempotent re-runs, dry-run, untouched worksheets, no keys / no network
+  [7] Master Sheet switches: ';' lists, '!' exclusions, 'Only Check Primary Links' (Product URLs only +
+      same-vendor SerpApi fallback)
 
 Run:  python test_offline.py            (from the repo folder containing the workbook)
 """
@@ -701,6 +703,229 @@ check("Cadence: priority-1 item checked yesterday is skipped",
 pt.requests.Session = _orig_session
 
 # ---------------------------------------------------------------------------
+print("\n[10] Master Sheet lists (';'), '!' exclusions, 'Only Check Primary Links'")
+from pricetrack.adapters import build_query
+
+
+class _Cell:                                   # openpyxl cell stand-in
+    def __init__(self, v):
+        self.value, self.hyperlink = v, None
+
+
+check("split_multi: ';', line breaks and full-width ';' all separate entries; blanks dropped",
+      pt.split_multi("a; b\nc；d;;  ;") == ["a", "b", "c", "d"], str(pt.split_multi("a; b\nc；d;;  ;")))
+pos, ex = pt.split_exclusions(pt.split_multi('W50; !Lite; ! Pro Max; 50 in; 50 inch; 50"; !'))
+check("'!' entries become exclusions (the phrase runs to the next ';'); a lone '!' is ignored",
+      ex == ["Lite", "Pro Max"] and not any(p.startswith("!") for p in pos), f"{pos} {ex}")
+check("synonym specs ('50 in', '50 inch', 50\") collapse to one phrase; a bare 'in' is read as inch",
+      pos == ["W50", "50 inch"], str(pos))
+check("'4 in 1' and model codes are left alone by the inch tidy-up",
+      pt.tidy_spec("4 in 1 hub") == "4 in 1 hub" and pt.split_exclusions(["RAYG1US1BLK"])[0] == ["RAYG1US1BLK"])
+urls = pt.extract_urls(_Cell("https://a.example.com/p; https://b.example.com/q,r ;\nhttps://c.example.com/z)"))
+check("Product URLs: split on ';' / line breaks, commas INSIDE a URL are kept, trailing ')' dropped",
+      urls == ["https://a.example.com/p", "https://b.example.com/q,r", "https://c.example.com/z"], str(urls))
+
+nova = mk_item("NovaWalk W50 TrekPad with 12% auto incline", specs="W50")
+nova.exclude = ["Lite", "Pro Max"]
+m_ok = idn.classify(nova, "NovaWalk W50 TrekPad with 12% auto incline")
+m_bad = idn.classify(nova, "NovaWalk W50 Lite TrekPad")
+check("'!Lite': the plain product is High - 'Lite' is NOT required in the title", m_ok.confidence == "High", str(m_ok))
+check("'!Lite': a listing containing 'Lite' is Low (excluded)", m_bad.confidence == "Low" and "excluded" in m_bad.reason, str(m_bad))
+check("'!Pro Max' (multi-word phrase) excludes only the whole phrase",
+      idn.excluded_phrase(nova, "NovaWalk W50 Pro Max") == "Pro Max" and idn.excluded_phrase(nova, "NovaWalk W50 Pro") is None)
+check("exclusions match whole words only ('Elite' / 'Satellite' are not 'Lite')",
+      idn.excluded_phrase(nova, "NovaWalk Elite W50 Satellite") is None)
+sonos_x = mk_item("Sonos Ray Soundbar", "RAYG1US1BLK")
+sonos_x.exclude = ["RAYG1EU1BLK"]
+check("a model-code exclusion matches the listing's MPN as well as its title",
+      idn.excluded_phrase(sonos_x, "Sonos Ray", mpns={"RAYG1EU1BLK"}) == "RAYG1EU1BLK")
+check("Product URL page whose slug carries the excluded word is rejected",
+      idn.validate_page(nova, "NovaWalk W50 TrekPad", set(), set(), slug="lite novawalk trekpad w50").confidence == "Low")
+q = build_query(nova, negatives=True)
+check("search query: excluded phrases are never search words, only Google minus-terms",
+      q.startswith("NovaWalk W50 TrekPad") and q.endswith('-Lite -"Pro Max"') and "Lite" not in q.replace("-Lite", ""), q)
+check("same-vendor query appends the merchant name before the minus-terms",
+      build_query(nova, negatives=True, vendor="Best Buy") == 'NovaWalk W50 TrekPad with 12% auto incline Best Buy -Lite -"Pro Max"')
+check("default query is unchanged when there are no exclusions", build_query(sonos) == "Sonos Ray Soundbar RAYG1US1BLK Unmounted")
+
+# ---- end-to-end: links-only items --------------------------------------------------------------------------
+fx10 = Path(tempfile.mkdtemp())
+wb10 = fx10 / "Home Wishlist.xlsx"
+shutil.copy(SRC, wb10)
+w10 = load_workbook(wb10)
+ms10 = w10[pt.SHEET_MASTER]
+for r in range(ms10.max_row, 1, -1):
+    ms10.delete_rows(r)
+h10 = pt.header_map(ms10)
+rows10 = [
+    {"wishlistitem": 11, "product": "Zorbo Smart Lamp", "priority": 4, "quantityneeded": 1, "opentoused": "Yes",
+     "targetprice": 70, "isbulkoption": "No", "onlycheckprimarylinks": "Yes",
+     "producturls": "https://www.zorbo.com/products/zorbo-smart-lamp;\nhttps://www.bestbuy.com/product/zorbo-smart-lamp/J1/sku/1234567?utm_source=x"},
+    {"wishlistitem": 12, "product": "Plink Wall Sconce", "priority": 4, "quantityneeded": 1, "opentoused": "No",
+     "targetprice": 40, "isbulkoption": "No", "onlycheckprimarylinks": "Yes",
+     "producturls": "https://www.etsy.com/listing/123/plink-wall-sconce"},
+    {"wishlistitem": 13, "product": "Quill Desk Lamp", "priority": 4, "quantityneeded": 1, "opentoused": "No",
+     "targetprice": 50, "isbulkoption": "No", "onlycheckprimarylinks": "Yes",
+     "producturls": "https://www.quilllamps.com/products/quill-desk-lamp-old; https://www.quilllamps.com/products/quill-desk-lamp"},
+    {"wishlistitem": 15, "product": "NovaWalk W50 TrekPad", "productspecifications": "W50; !Lite", "priority": 4,
+     "quantityneeded": 1, "opentoused": "No", "targetprice": 300, "isbulkoption": "No", "onlycheckprimarylinks": "Yes",
+     "producturls": "https://merachfit.com/products/novawalk-w50-trekpad"},
+    {"wishlistitem": 16, "product": "Zeta Smart Bulb", "priority": 4, "quantityneeded": 1, "opentoused": "Yes",
+     "targetprice": 20, "isbulkoption": "No", "onlycheckprimarylinks": "Yes",
+     "producturls": "https://www.zeta1.com/products/zeta-smart-bulb; https://www.zeta2.com/products/zeta-smart-bulb; "
+                    "https://www.zeta3.com/products/zeta-smart-bulb"},
+    {"wishlistitem": 17, "product": "Orbit Desk Fan", "priority": 4, "quantityneeded": 1, "opentoused": "No",
+     "targetprice": 30, "isbulkoption": "No", "onlycheckprimarylinks": "Yes"},
+]
+for i, row in enumerate(rows10, start=2):
+    for k, v in row.items():
+        col = pt.find_col(h10, k)
+        if col:
+            ms10.cell(i, col, v)
+w10.save(wb10)
+
+
+def G(title, price, source, link=None, **kw):
+    d = {"title": title, "extracted_price": price, "source": source, "product_link": "https://www.google.com/shopping/product/9", **kw}
+    if link:
+        d["link"] = link
+    return d
+
+
+def serp10(url, headers):
+    from urllib.parse import parse_qs, urlparse as up
+    q = parse_qs(up(url).query).get("q", [""])[0]
+    if "best buy" in q.lower():
+        return Resp(200, {"shopping_results": [
+            G("Zorbo Smart Lamp", 49.99, "Amazon.com"), G("Zorbo Smart Lamp", 52.00, "Walmart"),
+            G("Case for Zorbo Smart Lamp", 9.99, "Best Buy", "https://www.bestbuy.com/site/zorbo-case/7654321.p?skuId=7654321"),
+            G("Zorbo Smart Lamp", 54.99, "Best Buy", "https://www.bestbuy.com/site/zorbo-smart-lamp/1234567.p?skuId=1234567")]})
+    if "etsy" in q.lower():
+        return Resp(200, {"shopping_results": [
+            G("Plink Wall Sconce", 24.00, "Etsy", "https://www.etsy.com/listing/123/plink-wall-sconce"),
+            G("Plink Wall Sconce", 19.00, "Amazon.com")]})
+    if "merachfit" in q.lower():
+        return Resp(200, {"shopping_results": [
+            G("NovaWalk W50 Lite TrekPad", 199.00, "MERACH"), G("NovaWalk W50 TrekPad", 279.99, "MERACH")]})
+    if q == "Quill Desk Lamp":                 # general search: a row from the vendor that already priced + another seller
+        return Resp(200, {"shopping_results": [G("Quill Desk Lamp", 40.00, "Quill Lamps"), G("Quill Desk Lamp", 38.00, "Amazon.com")]})
+    return Resp(200, {"shopping_results": []})
+
+
+zorbo_pg = ld("Zorbo Smart Lamp", "59.99", brand="Zorbo")
+web10 = Web([
+    ("serpapi.com/account", Resp(200, {"total_searches_left": 90})),
+    ("serpapi.com/search", serp10),
+    ("zorbo-smart-lamp.js", Resp(404, None, "nf")),
+    ("zorbo.com/products/zorbo-smart-lamp", zorbo_pg),
+    ("bestbuy.com/product/", ConnectionError("reset by peer")),
+    ("bestbuy.com/site/zorbo-smart-lamp", ld("Zorbo Smart Lamp", "54.99", brand="Zorbo")),
+    ("etsy.com/listing/123", Resp(403, None, "blocked")),
+    ("quill-desk-lamp-old", Resp(404, None, "nf")),
+    ("quilllamps.com/products/quill-desk-lamp", ld("Quill Desk Lamp", "45.00", brand="Quill")),
+    ("novawalk-w50-trekpad", ld("NovaWalk W50 Lite TrekPad", "199.00", brand="Merach")),
+    ("zeta-smart-bulb.js", Resp(404, None, "nf")),
+    ("zeta1.com", ld("Zeta Smart Bulb", "12.00", brand="Zeta")),
+    ("zeta2.com", ld("Zeta Smart Bulb", "13.00", brand="Zeta")),
+    ("zeta3.com", ld("Zeta Smart Bulb", "14.00", brand="Zeta")),
+])
+pt.requests.Session = lambda: web10
+os.environ.update({"SERPAPI_KEY": "dummy"})
+os.environ.pop("BESTBUY_API_KEY", None)
+rc10 = pt.main(["--workbook", str(wb10), "--force", "--browser", "off", "--workers", "1", "--run-id", "links-1",
+                "--items", "11,12,13,15,16"])
+pt.requests.Session = _orig_session
+check("links-only run: exit code 0", rc10 == 0)
+w10 = load_workbook(wb10)
+rw10 = w10[pt.SHEET_RUN]
+rh10 = pt.header_map(rw10)
+r10 = {str(rw10.cell(r, rh10["wishlistitem"]).value): {k: rw10.cell(r, c).value for k, c in rh10.items()}
+       for r in range(2, rw10.max_row + 1) if rw10.cell(r, rh10["runid"]).value == "links-1"}
+for k, v in r10.items():
+    print(f"     item {k}: lowest={v.get('lowestpricefound')} mix={v.get('evidencemix')} | {v.get('retrievaloutcomes')}")
+    print(f"              status: {(v.get('producturlstatus') or '')[:260]}")
+check("5 Run Data rows written for the links-only items", sorted(r10) == ["11", "12", "13", "15", "16"], str(sorted(r10)))
+qs10 = [u for u in web10.log if "serpapi.com/search" in u]
+from urllib.parse import parse_qs, urlparse as _up
+queries = [parse_qs(_up(u).query)["q"][0] for u in qs10]
+check("<3 working vendor links: a GENERAL search per item + a same-vendor search only for vendors with no working link",
+      len(queries) == 7 and any(x.endswith("Best Buy") for x in queries) and any(x.endswith("etsy.com") for x in queries)
+      and any(x.endswith("merachfit.com -Lite") for x in queries) and "Quill Desk Lamp" in queries
+      and not any("quill" in x.lower() and "quilllamps" in x.lower() for x in queries), str(queries))
+check("3 vendors with a working link: NO search of any kind (no SerpApi query for that item)",
+      not any("zeta" in x.lower() for x in queries))
+check("no sitemap / retailer search / search-engine / eBay request was made for links-only items",
+      not [u for u in web10.log if any(s in u for s in ("sitemap", "robots.txt", "duckduckgo", "bing.com", "api.ebay.com",
+                                                          "api.bestbuy.com", "search?", "/s/", "search_results"))],
+      str([u for u in web10.log if "serpapi" not in u][:12]))
+a11 = r10.get("11", {})
+check("Best Buy link failed -> Best Buy's own listing found on Google, fetched and VERIFIED on the merchant page",
+      "replacement Best Buy listing verified on the merchant page" in (a11.get("producturlstatus") or "")
+      and "verified_discovered" in (a11.get("evidencemix") or "") and "verified_direct" in (a11.get("evidencemix") or ""),
+      f"{a11.get('producturlstatus')} | {a11.get('evidencemix')}")
+check("only Best Buy's listing replaces the dead Best Buy link (Amazon $49.99 / Walmart $52 / the case ignored)",
+      a11.get("lowestpricefound") == 54.99 and a11.get("listingssearched") == 2, f"{a11.get('lowestpricefound')} {a11.get('listingssearched')}")
+check("Source Notes tell you which link to update", "update the Master Sheet link" in (a11.get("sourcenotes") or "") and
+      "Only Check Primary Links" in (a11.get("sourcenotes") or ""), a11.get("sourcenotes"))
+check("skipped vendor-list search is recorded in Retrieval Outcomes (not silently dropped)", "skipped" in (a11.get("retrievaloutcomes") or ""))
+check("Run Data flags: failed primary link, empty expanded search, search mode",
+      (a11.get("primarylinkfailed") or "").startswith("Yes: bestbuy.com [timeout_network]")
+      and (a11.get("expandedsearchnoresults") or "") == "Yes: Google Shopping (general search)"
+      and "expanded SerpApi search (1 of 3 vendor links work)" in (a11.get("searchmode") or ""),
+      f"{a11.get('primarylinkfailed')} | {a11.get('expandedsearchnoresults')} | {a11.get('searchmode')}")
+a16 = r10.get("16", {})
+check("3 working vendor links: flags read 'No' / 'Not run', mode says no search, nothing skipped silently",
+      a16.get("primarylinkfailed") == "No" and (a16.get("expandedsearchnoresults") or "").startswith("Not run")
+      and "no search" in (a16.get("searchmode") or "") and a16.get("listingssearched") == 3,
+      f"{a16.get('primarylinkfailed')} | {a16.get('expandedsearchnoresults')} | {a16.get('searchmode')} | {a16.get('listingssearched')}")
+a12 = r10.get("12", {})
+check("Etsy (a Secondary-list vendor) is the item's own vendor: blocked page -> Etsy's Google row, labelled NOT verified",
+      "market_snapshot, not verified" in (a12.get("producturlstatus") or "") and "market_snapshot" in (a12.get("evidencemix") or "")
+      and "verified_" not in (a12.get("evidencemix") or "") and a12.get("lowestpricefound") == 24.0,
+      f"{a12.get('producturlstatus')} | {a12.get('evidencemix')} | {a12.get('lowestpricefound')}")
+a13 = r10.get("13", {})
+check("vendor with another working Product URL: no fallback, no credit spent",
+      "FAILED" in (a13.get("producturlstatus") or "") and "fallback" not in (a13.get("producturlstatus") or "")
+      and a13.get("lowestpricefound") == 38.0, f"{a13.get('producturlstatus')} {a13.get('lowestpricefound')}")
+check("general search runs alongside, but rows from a vendor with a working link are dropped (Amazon $38 kept, Quill $40 ignored)",
+      "1 Google row(s) from vendors with a working Product URL ignored" in (a13.get("sourcenotes") or "")
+      and (a13.get("expandedsearchnoresults") or "") == "No", f"{a13.get('sourcenotes')} | {a13.get('expandedsearchnoresults')}")
+a15 = r10.get("15", {})
+check("'!Lite': a Product URL page that is now the Lite model counts as a failed link, and the Lite Google row is not used",
+      "identity_mismatch" in (a15.get("producturlstatus") or "") and "excluded by '!Lite'" in (a15.get("producturlstatus") or "")
+      and a15.get("lowestpricefound") == 279.99, f"{a15.get('producturlstatus')} {a15.get('lowestpricefound')}")
+check("'!Lite' went to Google as a minus-term, never as a search word",
+      any("merachfit" in x and x.endswith("-Lite") and "Lite" not in x.replace("-Lite", "") for x in queries), str(queries))
+c_before = len(qs10)
+os.environ["PRICE_TRACKER_NO_DOTENV"] = "1"
+pt.requests.Session = lambda: web10
+pt.main(["--workbook", str(wb10), "--force", "--browser", "off", "--workers", "1", "--run-id", "links-2",
+         "--items", "11,12,13,15,16"])
+check("a re-run inside the cache window spends no further SerpApi credits",
+      len([u for u in web10.log if "serpapi.com/search" in u]) == c_before)
+w10b = load_workbook(wb10)
+rw10b = w10b[pt.SHEET_RUN]
+rh10b = pt.header_map(rw10b)
+r10b = {str(rw10b.cell(r, rh10b["wishlistitem"]).value): {k: rw10b.cell(r, c).value for k, c in rh10b.items()}
+        for r in range(2, rw10b.max_row + 1) if rw10b.cell(r, rh10b["runid"]).value == "links-2"}
+check("Run Data flags are read back: the same failed link on the next run reads '(run 2 in a row)'",
+      "run 2 in a row" in (r10b["11"].get("primarylinkfailed") or "") and "run 2 in a row" in (r10b["11"].get("expandedsearchnoresults") or "")
+      and r10b["16"].get("primarylinkfailed") == "No", f"{r10b['11'].get('primarylinkfailed')} | {r10b['11'].get('expandedsearchnoresults')}")
+# Only Check Primary Links = Yes with NO Product URLs -> normal search, recorded in Run Data
+pt.requests.Session = lambda: web10
+pt.main(["--workbook", str(wb10), "--force", "--browser", "off", "--workers", "1", "--run-id", "links-3", "--items", "17"])
+pt.requests.Session = _orig_session
+w10c = load_workbook(wb10)
+rw10c = w10c[pt.SHEET_RUN]
+rh10c = pt.header_map(rw10c)
+r17 = [{k: rw10c.cell(r, c).value for k, c in rh10c.items()} for r in range(2, rw10c.max_row + 1)
+       if rw10c.cell(r, rh10c["runid"]).value == "links-3"]
+check("'Yes' with no Product URLs falls back to the normal search and Run Data says so",
+      len(r17) == 1 and "no Product URLs are listed" in (r17[0].get("searchmode") or "")
+      and "normal search used" in (r17[0].get("sourcenotes") or "") and r17[0].get("primarylinkfailed") == "No links listed",
+      str(r17))
+
+# ---------------------------------------------------------------------------
 print("\n[9] No keys + no network: must not crash, must still log rows")
 tmp2 = Path(tempfile.mkdtemp()) / "Home Wishlist.xlsx"
 shutil.copy(FIXTURE, tmp2)
@@ -710,7 +935,7 @@ proc = subprocess.run([sys.executable, "price_tracker.py", "--workbook", str(tmp
 check("exit code 0 with no keys", proc.returncode == 0, proc.stderr[-400:])
 w2 = load_workbook(tmp2)
 rh = pt.header_map(w2[pt.SHEET_RUN])
-n_legacy = load_workbook(FIXTURE)[pt.SHEET_RUN].max_row
+n_legacy = pt.next_empty_row(load_workbook(FIXTURE)[pt.SHEET_RUN]) - 1     # (blank formatted rows are not data)
 outs = [str(w2[pt.SHEET_RUN].cell(r, rh["retrievaloutcomes"]).value) for r in range(n_legacy + 1, w2[pt.SHEET_RUN].max_row + 1)]
 check("Rows written; missing keys reported as api_unavailable (not a generic N/A)",
       len(outs) == 3 and all("api_unavailable" in o for o in outs), str(outs))

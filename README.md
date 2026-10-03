@@ -41,6 +41,37 @@ python test_offline.py                         # offline test-suite (no network,
 * **Quantity Needed**: the cheapest valid combination of singles and allowed multipacks (Bulk Keywords) is recorded
   as *Best Qty Plan*; one-off resale listings are used at most once.
 
+### Master Sheet syntax
+
+`;` separates the entries of **Product specifications**, **Search Keywords**, **Product URLs** and **Bulk Keywords**
+(a line break inside the cell works too). **Notes** is free text and is never parsed.
+
+* **`!` exclusions** - an entry that starts with `!` is *excluded*: `W50; !Lite` means "must be a W50, never a Lite".
+  The phrase runs up to the next `;`. It is never used as a search word (Google queries get `-Lite`), a listing or
+  Product URL page whose title / URL / model code contains it is rejected (whole words only: `Lite` ≠ `Elite`).
+  Works in both Product specifications and Search Keywords.
+* **Product specifications** are *required words* (every entry must appear in a listing title for High confidence).
+  Put only attributes a title will actually contain (`Black`, `50 inch`); a bare `50 in` is read as `50 inch`, and
+  synonyms (`50 in; 50 inch; 50"`) collapse into one. Setup context ("Unmounted") belongs in Notes.
+* **Only Check Primary Links** (`Yes` / `No`) - `Yes` prices the item from its **Product URLs**. The Primary and
+  Secondary vendor lists, retailer discovery, Best Buy keyword search and eBay are skipped, and the vendors of the
+  item's own links count as its primary vendors (so a deal at e.g. Article or Etsy is reported; only the listing's own
+  condition makes it resale). How much SerpApi searching follows depends on how many **vendors** have a working link
+  (`LINKS_ENOUGH_VENDORS = 3`):
+  * **3 or more vendors work** - no search of any kind.
+  * **2 or fewer work** - a general Google Shopping search runs *and* every vendor whose link(s) all failed gets a
+    same-vendor search: that vendor's Google row is identity-checked, its merchant page is fetched and priced there
+    (`verified_discovered`), or - when the page can't be fetched - the row stays a labelled `market_snapshot`.
+    A vendor with a working link is never searched (and its rows in the general results are ignored). A replacement
+    link that worked is re-tried first next time (0 credits). *Product URL Status* / *Source Notes* name the replacement
+    so you can update the sheet.
+  * `Yes` with **no Product URLs** - normal search.
+* **Run Data flags** - three columns record what happened each run: **Search Mode** (normal / links only, no search /
+  links + expanded search / the "Yes but no URLs" fallback), **Primary Link Failed** (`No`, `No links listed`, or
+  `Yes: host [outcome]`) and **Expanded Search No Results** (`No`, `Not run (reason)`, or `Yes: ...` naming the general
+  and/or same-vendor searches that found nothing). A `Yes` carries `(run N in a row)` - the tracker reads the previous
+  Run Data rows back to count consecutive flagged runs.
+
 ### Reliability
 Retries with exponential backoff + jitter (Retry-After honoured), one request at a time per domain with a minimum
 interval, a circuit breaker after repeated blocks, conditional GET (ETag/Last-Modified) with cached parsed results,

@@ -58,6 +58,10 @@ class Item:
     learned_gtins: set = field(default_factory=set)
     learned_mpns: set = field(default_factory=set)
     learned_brand: str = ""
+    # ---- Master Sheet switches ----
+    exclude: list = field(default_factory=list)         # '!phrase' entries from specs / keywords: never searched, never matched
+    only_links: bool = False                            # 'Only Check Primary Links' = Yes: Product URLs (+ SerpApi search when < 3 vendor links work)
+    links_only_fallback: bool = False                   # asked for Yes but no Product URLs are listed -> normal search is used
 
     @property
     def qty_needed(self) -> int:

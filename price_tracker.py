@@ -17,6 +17,10 @@ WHAT IT DOES
        DISCOVERY / CORROBORATION layer
          - Google Shopping via SerpApi (optional, cached, skipped when verified pages suffice) -> market_snapshot
          - eBay Browse API (optional - used/refurbished, only if "Open to used" = Yes)
+  2b. Master Sheet switches: 'Only Check Primary Links' = Yes -> Product URLs; with >= 3 vendors working no search, with
+      fewer a SerpApi general search + a same-vendor search for each vendor whose link failed (vendors with a working
+      link are never searched). '!phrase' in Product specifications / Search Keywords = never searched, never matched.
+      Run Data records the Search Mode, Primary Link Failed and Expanded Search No Results flags.
   3. Matches identifier-first (GTIN > MPN/SKU > page metadata > title/specs) with hard variant conflicts
      (region, generation, colour, voltage, size, accessory, bundle, sibling model).
   4. Normalises current / regular / shipping / effective price, pack size, condition, availability and
@@ -114,6 +118,9 @@ SERP_CACHE_HOURS = 20             # identical SerpApi query inside this window -
 SERP_REDISCOVER_DAYS = 6          # with >= SERP_SKIP_MIN_VERIFIED verified prices, re-query SerpApi only this often
 SERP_SKIP_MIN_VERIFIED = 2
 SNAPSHOT_VERIFY_MAX = 3           # Google Shopping rows with a direct merchant link that get verified on the merchant page
+LINKS_ENOUGH_VENDORS = 3          # 'Only Check Primary Links': this many VENDORS with a working Product URL -> no search at all
+LINK_FALLBACK_VERIFY_MAX = 2      # 'Only Check Primary Links': same-vendor Google rows fetched on the merchant page per failed vendor
+LINK_FALLBACK_CACHE_DAYS = 30     # a replacement link that worked is tried again first (0 credits) for this long
 QUERY_INCLUDE_SPECS = True
 
 # ---- Retrieval --------------------------------------------------------------------------------------
@@ -137,7 +144,9 @@ RUN_COLS = ["RowDateTime", "runID", "WishlistItem", "Product", "Listings Searche
             # --- identity / reference / history / quantity / audit ---
             "Reference Price", "Reference Type", "Prior Verified Price", "Change vs Prior",
             "Verified Low", "EWMA (Verified)", "Qty Needed", "Best Qty Plan", "Best Qty Total",
-            "Product Identity", "Evidence Mix", "Retrieval Outcomes"]
+            "Product Identity", "Evidence Mix", "Retrieval Outcomes",
+            # --- search-mode flags (also read back from earlier rows to count consecutive runs) ---
+            "Search Mode", "Primary Link Failed", "Expanded Search No Results"]
 DEALS_COLS = ["runID", "WishlistItem", "Product", "URL", "isPrimaryVendor", "Target Price",
               "Price", "RightProductConfidence",
               "Vendor", "Source", "Condition", "Listed Price", "Pack Qty", "% Below Target",
@@ -153,7 +162,8 @@ MONEY_COLS = {"Target Price", "Price", "Listed Price", "Avg Price (New)", "Avg P
 PCT_COLS = {"% Below Target", "% Below Baseline", "Change vs Prior"}
 COL_WIDTHS = {"URL": 50, "Source Notes": 60, "Product URL Status": 50, "Listing Title": 55, "Deal Rule": 42,
               "Secondary Vendor Comments": 55, "Vendor": 20, "RowDateTime": 17, "Best Qty Plan": 50,
-              "Retrieval Outcomes": 50, "Corroborated By": 40, "Product Identity": 30}
+              "Retrieval Outcomes": 50, "Corroborated By": 40, "Product Identity": 30,
+              "Search Mode": 45, "Primary Link Failed": 45, "Expanded Search No Results": 45}
 
 
 def log(msg: str) -> None:
@@ -178,7 +188,37 @@ def truthy(v) -> bool:
 
 
 def split_multi(v) -> list:
-    return [p.strip() for p in str(v or "").split(";") if p.strip()]
+    """';' separates the entries of a Master Sheet cell (a line break inside the cell works too)."""
+    return [p.strip() for p in re.split(r"[;\uff1b\r\n]+", str(v or "")) if p.strip()]
+
+
+_BARE_INCH = re.compile(r"(?<=\d)\s*in\b(?![-\s]*\d)(?!-)", re.I)
+
+
+def tidy_spec(s: str) -> str:
+    """'50 in' / '16.4 in' -> '50 inch' (a bare 'in' is never a word in a title, so a spec written that way
+    could never be matched). Leaves '4 in 1' and 'in-wall' alone."""
+    return _BARE_INCH.sub(" inch", s)
+
+
+def split_exclusions(parts: list) -> tuple:
+    """Entries starting with '!' are EXCLUSIONS ('!Lite' = never use / never match 'Lite'): the phrase is everything
+    up to the next ';' or the end of the cell. Returns (positive entries, excluded phrases); repeats that normalise
+    to the same words ('50 in', '50 inch', '50"') are collapsed."""
+    pos, excl, seen = [], [], set()
+    for p in parts:
+        neg = p.lstrip().startswith("!")
+        text = p.lstrip().lstrip("!").strip()
+        if not text:
+            continue
+        if not looks_like_sku(text):
+            text = tidy_spec(text)
+        key = (neg, frozenset(norm_text(text).split()) or text.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        (excl if neg else pos).append(text)
+    return pos, excl
 
 
 def norm_header(s) -> str:
@@ -200,7 +240,7 @@ def find_col(hm: dict, *names: str) -> Optional[int]:
     return None
 
 
-_URL_RE = re.compile(r"https?://[^\s;,<>\"']+", re.I)
+_URL_RE = re.compile(r"https?://[^\s;\uff1b<>\"']+", re.I)     # ';' separates URLs; commas inside a URL are kept
 
 
 def extract_urls(cell) -> list:
@@ -210,7 +250,7 @@ def extract_urls(cell) -> list:
     target = getattr(link, "target", None) if link else None
     if target and target.lower().startswith("http"):
         found.append(target)
-    return list(dict.fromkeys(normalize_url(u.rstrip(").")) for u in found))
+    return list(dict.fromkeys(normalize_url(u.rstrip(").,")) for u in found))
 
 
 def load_items(ws) -> list:
@@ -222,6 +262,7 @@ def load_items(ws) -> list:
         "kw": ("Search Keywords",), "loc": ("Location",), "pri": ("Priority",),
         "qty": ("Quantity Needed",), "used": ("Open to used",), "target": ("Target Price",),
         "bulk": ("Is Bulk Option",), "bkw": ("Bulk Keywords",),
+        "only": ("Only Check Primary Links", "Only Check Product URLs"),
         "urls": ("Product URLs", "Product URL", "Product Links", "Links"),
         "gtin": ("GTIN", "UPC", "EAN", "GTIN/UPC", "UPC/EAN"), "mpn": ("MPN", "Model Number", "Model", "Manufacturer Part"),
         "brand": ("Brand", "Manufacturer")}.items()}
@@ -236,8 +277,15 @@ def load_items(ws) -> list:
         product = get(r, "product")
         if not product or not str(product).strip():
             continue
-        kws = split_multi(get(r, "kw"))
-        specs = split_multi(get(r, "specs"))
+        kws, kw_excl = split_exclusions(split_multi(get(r, "kw")))
+        specs, spec_excl = split_exclusions(split_multi(get(r, "specs")))
+        urls = extract_urls(ws.cell(r, c["urls"])) if c.get("urls") else []
+        only_links = truthy(get(r, "only"))
+        if only_links and not urls:
+            log(f"  NOTE: item {get(r, 'wid')} has 'Only Check Primary Links' = Yes but no Product URLs - normal search used")
+            only_links, links_fallback = False, True
+        else:
+            links_fallback = False
         skus = [k for k in kws if looks_like_sku(k)]
         spec_kw = [k for k in kws if k not in skus]
         try:
@@ -252,8 +300,9 @@ def load_items(ws) -> list:
             open_used=truthy(get(r, "used")), target=parse_price(get(r, "target")),
             bulk=truthy(get(r, "bulk")), bulk_sizes=parse_bulk_sizes(get(r, "bkw")),
             skus=skus, spec_phrases=specs + spec_kw,
-            urls=extract_urls(ws.cell(r, c["urls"])) if c.get("urls") else [],
-            gtins=gtins, mpns=split_multi(get(r, "mpn")), brand=str(get(r, "brand") or "").strip()))
+            urls=urls, gtins=gtins, mpns=split_multi(get(r, "mpn")), brand=str(get(r, "brand") or "").strip(),
+            exclude=list(dict.fromkeys(spec_excl + kw_excl)), only_links=only_links,
+            links_only_fallback=links_fallback))
     return items
 
 
@@ -294,7 +343,8 @@ def load_history(ws) -> list:
     col = {k: find_col(hm, n) for k, n in {
         "dt": "RowDateTime", "run": "runID", "wid": "WishlistItem", "avg_new": "Avg Price (New)",
         "avg_res": "Avg Price (Resale)", "n_new": "Avg Sample (New)", "n_res": "Avg Sample (Resale)",
-        "baseline": "Vendor Baseline (New)", "baseline_src": "Baseline Source"}.items()}
+        "baseline": "Vendor Baseline (New)", "baseline_src": "Baseline Source",
+        "link_failed": "Primary Link Failed", "no_results": "Expanded Search No Results"}.items()}
     out = []
     for r in range(2, ws.max_row + 1):
         dt = _to_dt(ws.cell(r, col["dt"]).value) if col["dt"] else None
@@ -304,8 +354,30 @@ def load_history(ws) -> list:
         out.append({"wid": str(g("wid")).strip(), "dt": dt, "run": str(g("run") or ""),
                     "avg_new": parse_price(g("avg_new")), "avg_res": parse_price(g("avg_res")),
                     "n_new": parse_price(g("n_new")), "n_res": parse_price(g("n_res")),
-                    "baseline": parse_price(g("baseline")), "baseline_src": str(g("baseline_src") or "")})
+                    "baseline": parse_price(g("baseline")), "baseline_src": str(g("baseline_src") or ""),
+                    "link_failed": str(g("link_failed") or ""), "no_results": str(g("no_results") or "")})
     return out
+
+
+def flag_streak(history: list, wid, field: str, run_id: str = "") -> int:
+    """How many of this item's most recent earlier runs (newest first) already carried a 'Yes...' in Run Data column `field`."""
+    rows = sorted((h for h in history if h["wid"] == str(wid).strip() and h.get("run") != run_id),
+                  key=lambda h: h["dt"], reverse=True)
+    n = 0
+    for h in rows:
+        if str(h.get(field) or "").startswith("Yes"):
+            n += 1
+        else:
+            break
+    return n
+
+
+def flag_text(items: list, history: list, wid, field: str, run_id: str) -> str:
+    """'No' or 'Yes: a; b' - with '(run N in a row)' when earlier Run Data rows were flagged too."""
+    if not items:
+        return "No"
+    n = flag_streak(history, wid, field, run_id)
+    return "Yes" + (f" (run {n + 1} in a row)" if n else "") + ": " + "; ".join(items)
 
 
 def resale_trend(history: list, wid, now: datetime, exclude_run: str = "") -> Optional[float]:
@@ -408,6 +480,8 @@ def product_url_phase(item: Item, ctx: Context) -> tuple:
                      "identity unconfirmed - Medium, needs corroboration (not trusted)")
             status[u] = (f"{host}: [{res.outcome}] ${first.price:,.2f} {stock} - {res.detail}; {ident}"
                          + (f" (+{len(res.listings) - 1} variants)" if len(res.listings) > 1 else ""))
+            if res.outcome == Outcome.IDENTITY_MISMATCH:       # the link now shows a different product: not a usable link
+                failed.append((u, host, url_vendor_name(host, ctx.primary), res.outcome))
         else:
             status[u] = f"{host}: [{res.outcome}] FAILED - {res.detail}"
             failed.append((u, host, url_vendor_name(host, ctx.primary), res.outcome))
@@ -477,6 +551,156 @@ def fill_failed_urls(item: Item, failed: list, snaps: list, status: dict) -> Non
         status[url] = status.get(url, "") + f" -> ${best.price:,.2f} via Google Shopping fallback (market_snapshot, not verified)"
 
 
+def link_fallback_phase(item: Item, failed: list, ctx: Context, url_status: dict, ok_hosts: set) -> tuple:
+    """'Only Check Primary Links' = Yes. For each VENDOR whose Product URL(s) could not be used, look for that same
+    vendor's own listing of the product through SerpApi (Google Shopping) - e.g. a dead Best Buy link -> the Best Buy
+    row Google lists for the exact product. Nothing else is searched.
+      1. a replacement link that worked on an earlier run is re-fetched first (0 credits)
+      2. SerpApi rows from that vendor only (cached 20 h), identity-checked; their direct merchant link is fetched and
+         priced on the merchant page itself (verified_discovered)
+      3. no fetchable link -> the vendor's Google row stays a market_snapshot, clearly labelled as not verified
+    A vendor with another Product URL that did price is not searched (no credit spent).
+    Returns (listings, results, notes, empty) - `empty` names every vendor whose search yielded nothing usable."""
+    a = ctx.args
+    serp, page = ctx.adapters["serpapi"], ctx.adapters["page"]
+    ok_keys = {vendor_key(h) for h in ok_hosts}
+    out, results, notes, tried, empty = [], [], [], set(), []
+    packs = pricing.allowed_packs(item)
+
+    def verified(res) -> list:
+        return [x for x in res.listings
+                if classify(item, x.title, gtins=x.gtins, mpns=x.mpns, pack_qty=x.pack_qty_hint or 1).confidence
+                in ("High", "Medium")]
+
+    for url, host, vname, outcome in failed:
+        key = vendor_key(host)
+        if key in tried or key in ok_keys:
+            continue
+        tried.add(key)
+        label = vname or host
+        # 1. cached replacement link
+        cached = ctx.state.discovery_get(item, host)
+        if (cached and cached.get("ok") and cached.get("url") and normalize_url(cached["url"]) != normalize_url(url)
+                and ctx.state.age_days(cached.get("ts")) <= LINK_FALLBACK_CACHE_DAYS):
+            res = run_safely(page.fetch, "page", host, cached["url"], item, ctx.actx, vendor=label, evidence=VERIFIED_DISCOVERED)
+            good = verified(res)
+            if good:
+                for x in good:
+                    x.source, x.method = "discovered", f"{x.method} (replacement link from an earlier run)"
+                out += good
+                results.append(SourceResult("link-fallback", label, Outcome.SUCCESS, "cached replacement link", good))
+                url_status[url] = (url_status.get(url, f"{host}: [{outcome}] FAILED") +
+                                   f" -> replacement link re-verified: {good[0].url} ${good[0].price:,.2f}")
+                notes.append(f"{label}: Product URL failed ({outcome}); using replacement link {good[0].url}")
+                continue
+        # 2. SerpApi, this vendor only
+        if a.no_serpapi:
+            url_status[url] = url_status.get(url, f"{host}: [{outcome}]") + " -> same-vendor fallback skipped (--no-serpapi)"
+            results.append(SourceResult("link-fallback", label, Outcome.SKIPPED, "--no-serpapi"))
+            continue
+        r = run_safely(serp.search_vendor, "serpapi", label, item, ctx.actx, vendor=label, host=host,
+                       cache_hours=SERP_CACHE_HOURS)
+        results.append(r)
+        if r.outcome not in (Outcome.SUCCESS,):
+            why = r.detail or r.outcome
+            url_status[url] = url_status.get(url, f"{host}: [{outcome}]") + f" -> same-vendor fallback: {r.outcome} ({why})"
+            notes.append(f"{label}: Product URL failed ({outcome}); same-vendor fallback {r.outcome} ({why})"[:200])
+            if r.outcome == Outcome.NO_MATCH:
+                empty.append(f"{label} (same-vendor Google Shopping)")
+            continue
+        for l in r.listings:
+            pricing.normalize_prices(l)
+        if "." in label and r.listings:
+            label = r.listings[0].vendor or label                    # 'etsy.com' -> 'Etsy' (the name Google shows)
+        cands = [l for l in r.listings
+                 if (l.condition == "new" or item.open_used) and (packs is None or l.pack_qty in packs)
+                 and classify(item, l.title, gtins=l.gtins, mpns=l.mpns, pack_qty=l.pack_qty).confidence != "Low"]
+        direct = lambda l: l.url.startswith("http") and "google." not in host_of(l.url)       # noqa: E731
+        cands.sort(key=lambda l: (classify(item, l.title, gtins=l.gtins, mpns=l.mpns, pack_qty=l.pack_qty).confidence != "High",
+                                  l.pack_qty != 1, not direct(l), l.unit_price))
+        if not cands:
+            url_status[url] = url_status.get(url, f"{host}: [{outcome}]") + f" -> no matching {label} listing found via Google Shopping"
+            notes.append(f"{label}: Product URL failed ({outcome}); no matching {label} listing on Google Shopping")
+            empty.append(f"{label} (same-vendor Google Shopping)")
+            continue
+        fetched = []
+        for l in [c for c in cands if direct(c)][:LINK_FALLBACK_VERIFY_MAX]:
+            res = run_safely(page.fetch, "page", host_of(l.url), l.url, item, ctx.actx, vendor=label, evidence=VERIFIED_DISCOVERED)
+            good = verified(res)
+            if good:
+                for x in good:
+                    x.source, x.method = "discovered", f"{x.method} (SerpApi same-vendor fallback)"
+                fetched = good
+                ctx.state.discovery_put(item, host, url=normalize_url(good[0].url), ok=True)
+                break
+        if fetched:
+            out += fetched
+            url_status[url] = (url_status.get(url, f"{host}: [{outcome}] FAILED") +
+                               f" -> replacement {label} listing verified on the merchant page: {fetched[0].url} ${fetched[0].price:,.2f}")
+            notes.append(f"{label}: Product URL failed ({outcome}); replacement {fetched[0].url} (update the Master Sheet link)")
+            continue
+        best = {}                                                       # cheapest-confidence row per pack size
+        for l in cands:
+            best.setdefault(l.pack_qty, l)
+        for l in best.values():
+            l.vendor = label
+            l.seller_comment = (f"Google Shopping row from {label} standing in for your Product URL ({host} {outcome}); "
+                                f"market snapshot, price not verified on the merchant page")
+            out.append(l)
+        first = next(iter(best.values()))
+        url_status[url] = (url_status.get(url, f"{host}: [{outcome}] FAILED") +
+                           f" -> ${first.unit_price:,.2f} from {label} via Google Shopping (market_snapshot, not verified"
+                           + (f"; link {first.url}" if direct(first) else "") + ")")
+        notes.append(f"{label}: Product URL failed ({outcome}); {label} Google row used as market_snapshot")
+    return out, results, notes, empty
+
+
+def serp_general_phase(item: Item, ctx: Context, listings: list, failed: list, url_status: dict, covered: set,
+                       notes: list, results: list, empty: list, links_only: bool = False,
+                       skip_keys: frozenset = frozenset()) -> list:
+    """General Google Shopping search (SerpApi) for the product + merchant verification of rows that link straight to a
+    merchant. Returns the market-snapshot rows. links_only: always run (the SerpApi policy below is for normal items) and
+    drop rows from vendors (`skip_keys`) that already have a working Product URL - their price is known from the page."""
+    a, serp = ctx.args, ctx.adapters["serpapi"]
+    if a.no_serpapi:
+        notes.append("SerpApi: skipped (--no-serpapi)")
+        return []
+    if not serp.available()[0] and serp.client.reason == "SERPAPI_KEY not set":
+        notes.append(f"SerpApi: {Outcome.API} ({serp.client.reason})")
+        results.append(SourceResult("serpapi", "Google Shopping", Outcome.API, serp.client.reason))
+        return []
+    n_verified = sum(1 for l in listings if l.evidence in VERIFIED and l.in_stock is not False)
+    # Policy: when verified merchant pages already price the item and discovery ran recently, don't
+    # spend a credit - but a cached response (e.g. a re-run of the same day) is free and still used.
+    skip = (not links_only and not a.force_discovery and n_verified >= SERP_SKIP_MIN_VERIFIED and not failed
+            and ctx.state.serp_age_days(item) < SERP_REDISCOVER_DAYS)
+    r = run_safely(serp.search, "serpapi", "Google Shopping", item, ctx.actx, include_specs=QUERY_INCLUDE_SPECS,
+                   cache_hours=SERP_CACHE_HOURS, cache_only=skip)
+    if skip and r.outcome == Outcome.SKIPPED:
+        r.detail = (f"{n_verified} verified merchant prices; last discovery {ctx.state.serp_age_days(item):.1f}d ago "
+                    f"(< {SERP_REDISCOVER_DAYS}d) - credit saved")
+    results.append(r)
+    snaps = r.listings
+    if skip_keys:
+        kept = [s for s in snaps if not any(keys_match(vendor_key(s.vendor), k) for k in skip_keys)]
+        if len(kept) != len(snaps):
+            notes.append(f"{len(snaps) - len(kept)} Google row(s) from vendors with a working Product URL ignored")
+        snaps = kept
+    notes.append(f"SerpApi: {r.outcome} {len(snaps)} listings" + (f" ({r.detail})" if r.detail else ""))
+    if r.outcome == Outcome.NO_MATCH or (r.outcome == Outcome.SUCCESS and not snaps):
+        empty.append("Google Shopping (general search)")
+    if snaps and not a.no_direct:
+        vr = verify_snapshots(item, ctx, snaps, covered | {host_of(l.url) for l in listings if l.evidence in VERIFIED})
+        results += vr
+        for x in vr:
+            listings += x.listings
+        if any(x.listings for x in vr):
+            notes.append("verified on merchant page: " + ", ".join(x.target for x in vr if x.listings))
+    if failed and snaps and not links_only:
+        fill_failed_urls(item, failed, snaps, url_status)
+    return snaps
+
+
 def _outcome_summary(results: list) -> str:
     cnt = Counter(r.outcome for r in results)
     parts = []
@@ -493,6 +717,7 @@ def process_item(item: Item, ctx: Context) -> tuple:
     a = ctx.args
     ctx.state.apply_learned(item)
     notes, results = [], []
+    links_only = item.only_links          # Master Sheet 'Only Check Primary Links' = Yes
 
     # --- 1. Product URLs (trusted candidates) --------------------------------------------------------
     listings, url_status, failed, learned = [], {}, [], []
@@ -500,12 +725,18 @@ def process_item(item: Item, ctx: Context) -> tuple:
         ls, url_status, failed, learned, res = product_url_phase(item, ctx)
         listings += ls
         results += res
+    elif links_only:                      # --no-direct: no merchant pages, so every vendor goes to the SerpApi fallback
+        failed = [(u, host_of(u), url_vendor_name(host_of(u), ctx.primary), "skipped") for u in item.urls]
     covered = {host_of(u) for u in item.urls} if not a.no_direct else set()
     if learned:
         notes.append("learned " + ", ".join(learned))
 
     # --- 2. Verification adapters (identifier-first, cached discovery) -------------------------------
-    if not a.no_direct:
+    if links_only:
+        notes.append("Only Check Primary Links = Yes: vendor lists, retailer discovery, Best Buy keyword search and eBay skipped")
+        results.append(SourceResult("search", "vendor lists + retailer discovery + eBay", Outcome.SKIPPED,
+                                    "Only Check Primary Links = Yes"))
+    elif not a.no_direct:
         for r in verification_phase(item, ctx, covered):
             results.append(r)
             listings += r.listings
@@ -513,40 +744,35 @@ def process_item(item: Item, ctx: Context) -> tuple:
                 notes.append(r.note()[:160])          # (no_match / skipped / blocked are summarised in Retrieval Outcomes)
 
     # --- 3. Discovery / corroboration: SerpApi (optional, cached, policy-gated) ----------------------
-    snaps = []
-    serp = ctx.adapters["serpapi"]
-    n_verified = sum(1 for l in listings if l.evidence in VERIFIED and l.in_stock is not False)
-    if a.no_serpapi:
-        notes.append("SerpApi: skipped (--no-serpapi)")
-    elif not serp.available()[0] and serp.client.reason == "SERPAPI_KEY not set":
-        notes.append(f"SerpApi: {Outcome.API} ({serp.client.reason})")
-        results.append(SourceResult("serpapi", "Google Shopping", Outcome.API, serp.client.reason))
+    snaps, empty = [], []
+    failed_urls = {f[0] for f in failed}
+    ok_hosts = {host_of(u) for u in item.urls if u not in failed_urls}          # vendors with >= 1 link that priced
+    working = {vendor_key(h) for h in ok_hosts if vendor_key(h)}
+    if links_only and len(working) >= LINKS_ENOUGH_VENDORS:
+        mode = f"Product URLs only ({len(working)} vendor links work, >= {LINKS_ENOUGH_VENDORS}: no search)"
+        notes.append(f"Only Check Primary Links: {len(working)} vendors with a working link - no search run")
+        results.append(SourceResult("search", "expanded search", Outcome.SKIPPED, mode))
+    elif links_only:
+        # < 3 vendors with a working link: SerpApi general search + a same-vendor search for every vendor whose
+        # link(s) all failed. A vendor that has a working link is never searched.
+        mode = f"Product URLs + expanded SerpApi search ({len(working)} of {LINKS_ENOUGH_VENDORS} vendor links work)"
+        fb_ls, fb_res, fb_notes, fb_empty = link_fallback_phase(item, failed, ctx, url_status, ok_hosts)
+        listings += fb_ls
+        results += fb_res
+        notes += fb_notes
+        empty += fb_empty
+        snaps = serp_general_phase(item, ctx, listings, failed, url_status, covered, notes, results, empty,
+                                   links_only=True, skip_keys=frozenset(working))
     else:
-        # Policy: when verified merchant pages already price the item and discovery ran recently, don't
-        # spend a credit - but a cached response (e.g. a re-run of the same day) is free and still used.
-        skip = (not a.force_discovery and n_verified >= SERP_SKIP_MIN_VERIFIED and not failed
-                and ctx.state.serp_age_days(item) < SERP_REDISCOVER_DAYS)
-        r = run_safely(serp.search, "serpapi", "Google Shopping", item, ctx.actx, include_specs=QUERY_INCLUDE_SPECS,
-                       cache_hours=SERP_CACHE_HOURS, cache_only=skip)
-        if skip and r.outcome == Outcome.SKIPPED:
-            r.detail = (f"{n_verified} verified merchant prices; last discovery {ctx.state.serp_age_days(item):.1f}d ago "
-                        f"(< {SERP_REDISCOVER_DAYS}d) - credit saved")
-        results.append(r)
-        snaps = r.listings
-        notes.append(f"SerpApi: {r.outcome} {len(snaps)} listings" + (f" ({r.detail})" if r.detail else ""))
-        if snaps and not a.no_direct:
-            vr = verify_snapshots(item, ctx, snaps, covered | {host_of(l.url) for l in listings if l.evidence in VERIFIED})
-            results += vr
-            for x in vr:
-                listings += x.listings
-            if any(x.listings for x in vr):
-                notes.append("verified on merchant page: " + ", ".join(x.target for x in vr if x.listings))
-        if failed and snaps:
-            fill_failed_urls(item, failed, snaps, url_status)
+        mode = ("Normal search (Only Check Primary Links = Yes but no Product URLs are listed)"
+                if item.links_only_fallback else "Normal search")
+        if item.links_only_fallback:
+            notes.append("Only Check Primary Links = Yes but no Product URLs listed: normal search used")
+        snaps = serp_general_phase(item, ctx, listings, failed, url_status, covered, notes, results, empty)
 
     # --- 4. eBay (optional; only when open to used / wider search) -----------------------------------
     ebay_ls = []
-    if item.open_used:
+    if item.open_used and not links_only:
         eb = ctx.adapters["ebay"]
         if a.no_ebay:
             notes.append("eBay: skipped (--no-ebay)")
@@ -602,7 +828,7 @@ def process_item(item: Item, ctx: Context) -> tuple:
         s = stats[pool]
         if s and s["n"] < MARKET_MIN_SAMPLE and not (pool == "new" and baseline):
             notes.append(f"Avg ({label}) from only {s['n']} listing(s): recorded, but deal rules need {MARKET_MIN_SAMPLE}+")
-    if item.urls and a.no_direct:
+    if item.urls and a.no_direct and not links_only:
         url_status = {u: "skipped (--no-direct)" for u in item.urls}
 
     change = None
@@ -623,6 +849,23 @@ def process_item(item: Item, ctx: Context) -> tuple:
         identity.append("MPN/SKU " + ", ".join(item.all_mpns[:3]))
     if item.brand or item.learned_brand:
         identity.append("brand " + (item.brand or item.learned_brand))
+
+    # Run Data flags (also read back next run to count consecutive runs): failed primary link / empty expanded search
+    if not item.urls:
+        link_flag = "No links listed"
+    elif a.no_direct:
+        link_flag = "Not checked (--no-direct)"
+    else:
+        link_flag = flag_text(list(dict.fromkeys(f"{h} [{oc}]" for _, h, _, oc in failed)), ctx.history, item.wid,
+                              "link_failed", ctx.run_id)
+    searched = any(r.source in ("serpapi", "link-fallback") and r.outcome in (Outcome.SUCCESS, Outcome.NO_MATCH, Outcome.NETWORK)
+                   for r in results)
+    if searched:
+        none_flag = flag_text(empty, ctx.history, item.wid, "no_results", ctx.run_id)
+    else:
+        why = ("SerpApi unavailable" if any(r.outcome == Outcome.API for r in results) else
+               "--no-serpapi" if a.no_serpapi else "not needed" if links_only else "")
+        none_flag = "Not run" + (f" ({why})" if why else "")
 
     run_row = {
         "RowDateTime": ctx.now, "runID": ctx.run_id, "WishlistItem": item.wid, "Product": item.product,
@@ -650,6 +893,7 @@ def process_item(item: Item, ctx: Context) -> tuple:
         "Product Identity": " | ".join(identity) or "title/spec matching only (no identifiers known yet)",
         "Evidence Mix": evidence_mix or "no eligible listings",
         "Retrieval Outcomes": _outcome_summary(results)[:600],
+        "Search Mode": mode, "Primary Link Failed": link_flag[:300], "Expanded Search No Results": none_flag[:300],
     }
     deal_rows = []
     for l in deals:
@@ -904,7 +1148,8 @@ def main(argv=None) -> int:
     try:
         for it in todo:
             log(f"\n> [{it.wid}] {it.product} (priority {it.priority}, target ${it.target}, qty {it.qty_needed}, "
-                f"{'wide+used' if it.open_used else 'primary vendors only'})")
+                f"{'Product URLs only (+ same-vendor fallback)' if it.only_links else 'wide+used' if it.open_used else 'primary vendors only'}"
+                f"{', excluding ' + '; '.join(it.exclude) if it.exclude else ''})")
             try:
                 run_row, deal_rows, deals = process_item(it, ctx)
             except Exception as e:     # one bad item must never sink the whole run

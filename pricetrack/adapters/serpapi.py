@@ -12,8 +12,8 @@ from typing import Optional
 import requests
 
 from ..models import Item, Listing, MARKET_SNAPSHOT, Outcome, SourceResult, utcnow
-from ..text import detect_condition, norm_text, parse_price
-from ..urls import host_of, normalize_url
+from ..text import detect_condition, keys_match, norm_text, parse_price, vendor_key
+from ..urls import host_of, normalize_url, same_site
 from .base import AdapterContext, SourceAdapter
 
 SERPAPI_SEARCH_URL = "https://serpapi.com/search.json"
@@ -157,8 +157,10 @@ def parse_serpapi(results: list) -> list:
     return out
 
 
-def build_query(item: Item, include_specs: bool = True) -> str:
-    """Product name + SKU/MPN (+ specs), skipping words already in the name."""
+def build_query(item: Item, include_specs: bool = True, negatives: bool = False, vendor: str = "") -> str:
+    """Product name + SKU/MPN (+ specs), skipping words already in the name.
+    '!' exclusions are never added as search words; negatives=True appends them as Google minus-terms
+    (-Lite, -"Pro Max"), and vendor="Best Buy" appends the merchant name (same-vendor fallback queries)."""
     parts, have = [item.product], set(norm_text(item.product).split())
     extras = list(item.all_mpns) + (list(item.spec_phrases) if include_specs else [])
     for e in extras:
@@ -166,7 +168,13 @@ def build_query(item: Item, include_specs: bool = True) -> str:
         if toks and not all(t in have for t in toks):
             parts.append(e)
             have.update(toks)
-    return " ".join(parts)[:150]
+    tail = (f" {vendor}" if vendor else "") + \
+           ("".join(f' -"{x}"' if " " in x.strip() else f" -{x.strip()}" for x in item.exclude) if negatives else "")
+    core = " ".join(parts)
+    room = max(40, 150 - len(tail))
+    if len(core) > room:
+        core = core[:room].rsplit(" ", 1)[0] if " " in core[:room] else core[:room]
+    return core + tail
 
 
 class SerpApiAdapter(SourceAdapter):
@@ -182,9 +190,9 @@ class SerpApiAdapter(SourceAdapter):
     def search(self, item: Item, ctx: AdapterContext, include_specs: bool = True, cache_hours: float = 20,
                cache_only: bool = False, **kw) -> SourceResult:
         """cache_only=True: reuse a cached response if one exists (0 credits), never query."""
-        q1 = build_query(item, include_specs)
+        q1 = build_query(item, include_specs, negatives=True)
         rows, notes = [], []
-        for q in [q1] + ([build_query(item, False)] if build_query(item, False) != q1 else []):
+        for q in [q1] + ([build_query(item, False, negatives=True)] if build_query(item, False, negatives=True) != q1 else []):
             cached = ctx.state.serp_get(q, cache_hours)
             if cached is not None:
                 rows += cached
@@ -213,3 +221,49 @@ class SerpApiAdapter(SourceAdapter):
             ctx.state.serp_mark(item)
         return SourceResult(self.name, "Google Shopping", Outcome.SUCCESS if ls else Outcome.NO_MATCH,
                             ("; ".join(dict.fromkeys(notes))) if notes else "", ls)
+
+    # ---- same-vendor fallback (Master Sheet 'Only Check Primary Links' = Yes) --------------------------
+    @staticmethod
+    def vendor_queries(item: Item, vendor: str) -> list:
+        """Vendor-qualified Google Shopping queries, most specific first (at most two)."""
+        qs = [build_query(item, True, negatives=True, vendor=vendor)]
+        ids = list(item.all_mpns[:1])
+        if ids:                                    # short, identifier-led query: robust against long marketing names
+            head = " ".join(norm_text(item.product).split()[:4])
+            qs.append(f"{head} {ids[0]} {vendor}".strip())
+        return list(dict.fromkeys(q for q in qs if q))
+
+    def search_vendor(self, item: Item, ctx: AdapterContext, vendor: str = "", host: str = "",
+                      cache_hours: float = 20, **kw) -> SourceResult:
+        """Google Shopping rows from ONE merchant (the vendor of a Product URL that stopped working).
+        Rows from every other seller are discarded. A direct merchant link, when Google provides one,
+        is kept in Listing.url so the caller can fetch and verify that page."""
+        tag = f"{vendor or host} (Google Shopping)"
+        want_keys = [k for k in {vendor_key(vendor), vendor_key(host)} if k]
+        rows, notes, ls = [], [], []
+        for q in self.vendor_queries(item, vendor or host):
+            cached = ctx.state.serp_get(q, cache_hours)
+            if cached is not None:
+                raw, note = cached, "cached response"
+            else:
+                if self.client.disabled:
+                    if not rows:
+                        return SourceResult(self.name, tag, Outcome.API, self.client.reason)
+                    break
+                raw = self.client.shopping(q)
+                if raw is None:
+                    if not rows:
+                        return SourceResult(self.name, tag, Outcome.API if self.client.disabled else Outcome.NETWORK,
+                                            self.client.reason or "request failed")
+                    break
+                ctx.state.serp_put(q, raw)
+                note = "live query"
+            rows += raw
+            notes.append(note)
+            ls = [l for l in parse_serpapi(rows)
+                  if any(keys_match(vendor_key(l.vendor), k) for k in want_keys)
+                  or (host and l.url.startswith("http") and same_site(host_of(l.url), host))]
+            if ls:
+                break                              # the broader second query only when the first found nothing
+        return SourceResult(self.name, tag, Outcome.SUCCESS if ls else Outcome.NO_MATCH,
+                            "; ".join(dict.fromkeys(notes)), ls)

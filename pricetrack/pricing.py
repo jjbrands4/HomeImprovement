@@ -24,6 +24,11 @@ from .models import Item, Listing, VERIFIED, VERIFIED_DIRECT
 from .text import extract_pack_qty, keys_match, vendor_key
 from .urls import host_of
 
+
+def link_vendor_keys(item: Item) -> set:
+    """Vendor keys of the item's own Product URLs ('www.article.com' -> 'article')."""
+    return {k for k in (vendor_key(host_of(u)) for u in item.urls) if k}
+
 # ---- Deal / sanity settings (price_tracker.py may override these module attributes) ----------------
 DEAL_DISCOUNT = 0.15
 TREND_MIN_DISCOUNT = 0.0
@@ -66,10 +71,18 @@ def allowed_packs(item: Item) -> Optional[set]:
 
 def score_listings(item: Item, listings: list, primary: list, secondary_keys: list, dtc_names: set = frozenset()) -> None:
     """Fill pack / prices / vendor class / identity confidence / eligibility for every listing."""
+    link_keys = link_vendor_keys(item) if item.only_links else set()
     for l in listings:
         normalize_prices(l)
         l.vkey = vendor_key(l.vendor)
         l.is_primary = any(keys_match(l.vkey, v.key) for v in primary)
+        if item.only_links:
+            # 'Only Check Primary Links' = Yes: the Primary/Secondary vendor lists are bypassed. The vendors of the
+            # item's own Product URLs are the vendors that count (so Etsy / Article / a DTC shop can be reported),
+            # and only the listing's own condition makes it resale.
+            l.is_primary = l.is_primary or any(keys_match(l.vkey, k) for k in link_keys)
+            l.is_resale = l.condition in ("used", "refurbished")
+            continue
         on_secondary = any(keys_match(l.vkey, k) for k in secondary_keys) or l.source == "ebay"
         l.is_resale = on_secondary or l.condition in ("used", "refurbished")
 

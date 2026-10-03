@@ -256,6 +256,34 @@ def item_text(item: Item) -> str:
     return " ".join([item.product] + list(item.specs) + [k for k in item.keywords if not looks_like_sku(k)])
 
 
+def excluded_phrase(item: Item, title: str = "", mpns: Iterable[str] = (), slug: str = "") -> Optional[str]:
+    """First '!phrase' (Master Sheet specs / keywords) that this listing contains, else None.
+    Whole-word, in-order match on the normalised title ('Lite' never matches 'Satellite'); a model-code-like
+    phrase also matches the listing's MPNs / a compact title match. URL-slug words (order is lost) are only
+    tested for single-word phrases. A phrase made only of words of the product's own name is ignored (a
+    contradictory sheet row must not block every listing)."""
+    if not item.exclude:
+        return None
+    t_toks = norm_text(title).split()
+    t_compact = norm_code(title)
+    slug_set = set(norm_text(slug).split())
+    name_set = set(norm_text(item.product).split())
+    codes = {norm_code(m) for m in mpns}
+    for phrase in item.exclude:
+        p_toks = norm_text(phrase).split()
+        if not p_toks or set(p_toks) <= name_set:
+            continue
+        n = len(p_toks)
+        if any(t_toks[i:i + n] == p_toks for i in range(len(t_toks) - n + 1)):
+            return phrase
+        code = norm_code(phrase)
+        if looks_like_sku(phrase) and (code in codes or (len(code) >= 5 and code in t_compact)):
+            return phrase
+        if n == 1 and p_toks[0] in slug_set:
+            return phrase
+    return None
+
+
 def fingerprint(brand: str, model: str, gtin: str = "", attrs: str = "", pack: int = 1) -> str:
     """Canonical product fingerprint: brand + model/MPN + GTIN + material attributes + pack."""
     raw = "|".join([norm_text(brand), norm_code(model), gtin or "", norm_text(attrs), str(pack)])
@@ -330,6 +358,11 @@ def conflicts(item: Item, title: str, gtins: set = frozenset(), mpns: set = froz
     head = t_norm[:head_len]
     head_set = set(head.split())
     allowed_codes = {norm_code(c) for c in allow_codes}
+
+    # --- '!' exclusions from the Master Sheet (Product specifications / Search Keywords) ---------------
+    ex = excluded_phrase(item, title, mpns)
+    if ex:
+        return f"excluded by '!{ex}' in the Master Sheet"
 
     # --- identifiers -------------------------------------------------------------------------------
     i_gtins = item.all_gtins
@@ -494,6 +527,9 @@ def validate_page(item: Item, title: str, gtins: set, mpns: set, brand_hint: str
            (brand implied by the domain and generic category words like 'soundbar' may be absent)
        Hard conflicts -> Low (identity mismatch). Weak evidence -> Medium (does NOT establish trusted price)."""
     bad = conflicts(item, title, gtins, mpns, pack_qty, color)
+    if not bad:
+        ex = excluded_phrase(item, "", slug=slug)
+        bad = f"excluded by '!{ex}' in the page URL" if ex else None
     if bad:
         return Match("Low", f"Product URL page conflicts: {bad}")
     full = classify(item, title, gtins=gtins, mpns=mpns, pack_qty=pack_qty, color=color)

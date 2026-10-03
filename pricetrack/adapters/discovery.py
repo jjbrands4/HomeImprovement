@@ -17,7 +17,7 @@ import time
 from html import unescape as html_unescape
 from urllib.parse import quote_plus, unquote, urlparse
 
-from ..identity import ACCESSORY_WORDS, classify, has_identifier_hit
+from ..identity import ACCESSORY_WORDS, classify, excluded_phrase, has_identifier_hit
 from ..models import Item, Outcome, SourceResult, VERIFIED_DISCOVERED, Vendor
 from ..text import norm_text
 from ..urls import host_of, looks_like_listing_page, normalize_url, same_site, us_locale_ok
@@ -77,6 +77,8 @@ def rank_product_urls(urls: list, item: Item, vendor: Vendor, limit: int = DIREC
         comp = norm_text(path).replace(" ", "")
         if (toks & ACCESSORY_WORDS) - set(name_tokens):
             continue
+        if excluded_phrase(item, path.replace("-", " ").replace("_", " ").replace("/", " ")):
+            continue                                  # '!phrase' from the Master Sheet appears in the URL
         cov = sum(1 for t in name_tokens if t in toks or (len(t) >= 4 and t in comp)) / len(name_tokens)
         id_hit = any(k and len(k) >= 5 and k in comp for k in ids)
         if cov >= 0.5 or id_hit:
