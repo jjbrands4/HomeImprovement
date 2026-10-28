@@ -1,4 +1,4 @@
-# Suggestions from run gh-40214527797
+# Suggestions from run gh-40748768157
 
 ```text
 SUGGESTED VENDORS - confirm before adding (never added automatically)
@@ -6,10 +6,10 @@ SUGGESTED VENDORS - confirm before adding (never added automatically)
   (none qualify yet)
   Watching (not yet qualified):
   * Newegg.com  [marketplace seller; seen as Newegg.com - Riveira Store, Newegg.com - Walts TV]
-      stats : 8 High-confidence listings across 1 item(s) in 8 run(s); best $1,097.99 (1.00x the verified price, avg 1.00x); 0 verified on the merchant's own page
+      stats : 9 High-confidence listings across 1 item(s) in 9 run(s); best $1,097.99 (1.00x the verified price, avg 1.00x); 0 verified on the merchant's own page
       needs : 2+ different items   (domain would be newegg.com, vendor name)
   * 3reality
-      stats : 4 High-confidence listings across 1 item(s) in 4 run(s); best $13.49 (1.00x the verified price, avg 1.00x); 0 verified on the merchant's own page
+      stats : 5 High-confidence listings across 1 item(s) in 5 run(s); best $13.49 (1.00x the verified price, avg 1.00x); 0 verified on the merchant's own page
       needs : 2+ different items   (domain would be 3reality.com, guess - confirm)
   * everythingsmart.io
       stats : 3 High-confidence listings across 1 item(s) in 3 run(s); best $64.00 (1.00x the verified price, avg 1.00x); 3 verified on the merchant's own page
@@ -17,12 +17,12 @@ SUGGESTED VENDORS - confirm before adding (never added automatically)
   * Walmart  [marketplace seller; seen as Walmart - Third Reality Inc]
       stats : 2 High-confidence listings across 1 item(s) in 2 run(s); best $19.99 (1.33x the verified price, avg 1.33x); 0 verified on the merchant's own page
       needs : 3+ High-confidence listings; 2+ different items; best price within 5% of the verified price   (domain would be walmart.com, guess - confirm)
+  * Art Brand Studios
+      stats : 1 High-confidence listings across 1 item(s) in 1 run(s); best $627.00 (n/a the verified price, avg n/a); 0 verified on the merchant's own page
+      needs : 3+ High-confidence listings; 2+ different items; 2+ runs   (domain would be artbrandstudios.com, guess - confirm)
   * GreatBigCanvas.com
       stats : 1 High-confidence listings across 1 item(s) in 1 run(s); best $17.99 (n/a the verified price, avg n/a); 0 verified on the merchant's own page
       needs : 3+ High-confidence listings; 2+ different items; 2+ runs   (domain would be greatbigcanvas.com, vendor name)
-  * Mystic Metal Design
-      stats : 1 High-confidence listings across 1 item(s) in 1 run(s); best $175.00 (n/a the verified price, avg n/a); 0 verified on the merchant's own page
-      needs : 3+ High-confidence listings; 2+ different items; 2+ runs   (domain would be mysticmetaldesign.com, guess - confirm)
 
 MASTER SHEET SUGGESTIONS
   [2] Sonos Ray Soundbar
@@ -31,52 +31,11 @@ MASTER SHEET SUGGESTIONS
       - Product name word(s) 'uhd' appear in none of the 2 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
   [6] Govee COB LED Strip Lights 2 Pro 16.4ft
       - verified pages also report model code(s) H1AA2 (not in your MPN/Model cell)
-      - Product name word(s) 'led', 'lights', '16.4' appear in none of the 2 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
-      - spec/keyword '16.4 ft' is in none of the verified page titles - it can hold a page at Medium
-      - Product URL at amazon.com failed (identity_mismatch) - check the link still shows this exact product
   [11] Samsung Galaxy Tab A9 plus silver
       - Product URL reebelo.com is only Medium confidence (Product URL identity unconfirmed (weak name match))
       - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [12] Geometric Plant Poster living room 28x40
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [13] 28x40” Walnut stain - Poster Frame
-      - Product URL at arttoframe.com failed (identity_mismatch) - check the link still shows this exact product
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [14] Teak Mid Century Modern Wall Pocket Set of 5
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [15] 17 " H Faux Pampas Grass
+  [9] Costway 47x24 Treadmill May Large
       - Product URL at wayfair.com failed (identity_mismatch) - check the link still shows this exact product
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [16] Farmhouse Full Length Mirror with Stand 22x65 Inch, Wooden Frame Floor Mirror
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [17] Vertical Bonsai Moss Wall Art
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [18] kasa ks225 light switch dimmers
-      - Product URL at amazon.com failed (identity_mismatch) - check the link still shows this exact product
-  [19] THIRDREALITY Motion Sensor
-      - MPN/Model is blank - verified pages report P1WMSA1
-      - Brand is blank - verified pages report 'ThirdReality'
-  [20] Everything Presence One
-      - GTIN/UPC is blank - verified pages report 5061109960010
-      - MPN/Model is blank - verified pages report EP1-FULL-01
-      - Brand is blank - verified pages report 'Everything Smart Technology'
-  [21] Smart LV Wall Mount for Tablets
-      - Product URL at mount.modoco.io failed (parser_failure) - check the link still shows this exact product
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [22] Heat Wall Art
-      - Product URL at sandgrainstudio.com failed (identity_mismatch) - check the link still shows this exact product
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [23] The Dark Knight Wall Art
-      - Product name word(s) 'wall', 'art' appear in none of the 12 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
-      - Product URL sandgrainstudio.com is only Medium confidence (Product URL identity unconfirmed (weak name match))
-      - Best Buy shows $19.99 only via Google Shopping - add its product page to Product URLs to verify it
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [24] Dune Part 2 Wall Art
-      - Product name word(s) 'wall' appear in none of the 12 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
-      - Product URL sandgrainstudio.com is only Medium confidence (Product URL identity unconfirmed (weak name match))
-      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
-  [25] 12x18” Walnut stain - Poster Frame
-      - Product URL at arttoframe.com failed (identity_mismatch) - check the link still shows this exact product
       - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
 
 RETAILER SEARCH YIELD (site search / sitemap crawl)
