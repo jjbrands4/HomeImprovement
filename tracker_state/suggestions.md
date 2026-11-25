@@ -1,17 +1,17 @@
-# Suggestions from run gh-45065729961
+# Suggestions from run gh-45713504614
 
 ```text
 SUGGESTED VENDORS - confirm before adding (never added automatically)
   Qualifies when: 3+ High-confidence new listings, 2+ different items, 2+ runs, best price within 5% of the verified price; vendor on neither vendor list.
   * Newegg.com  [marketplace seller; seen as Newegg.com - Hooray Store, Newegg.com - Riveira Store, Newegg.com - Third Reality's Marketplace]
-      stats : 20 High-confidence listings across 2 item(s) in 18 run(s); best $19.99 (1.00x the verified price, avg 1.03x); 0 verified on the merchant's own page
+      stats : 21 High-confidence listings across 2 item(s) in 19 run(s); best $19.99 (1.00x the verified price, avg 1.04x); 0 verified on the merchant's own page
       sheet : Primary Vendor List -> Vendor = Newegg.com | isDirectToConsumer = 0 | Domain = newegg.com   (vendor name)
   Watching (not yet qualified):
   * 3reality
-      stats : 11 High-confidence listings across 1 item(s) in 11 run(s); best $13.49 (1.00x the verified price, avg 1.00x); 0 verified on the merchant's own page
+      stats : 12 High-confidence listings across 1 item(s) in 12 run(s); best $11.00 (0.76x the verified price, avg 0.98x); 0 verified on the merchant's own page
       needs : 2+ different items   (domain would be 3reality.com, guess - confirm)
   * everythingsmart.io
-      stats : 7 High-confidence listings across 1 item(s) in 7 run(s); best $63.00 (1.00x the verified price, avg 1.00x); 7 verified on the merchant's own page
+      stats : 8 High-confidence listings across 1 item(s) in 8 run(s); best $63.00 (1.00x the verified price, avg 1.00x); 8 verified on the merchant's own page
       needs : 2+ different items   (domain would be everythingsmart.io, merchant link)
   * GreatBigCanvas.com
       stats : 4 High-confidence listings across 1 item(s) in 4 run(s); best $17.99 (0.61x the verified price, avg 0.81x); 0 verified on the merchant's own page
@@ -30,17 +30,50 @@ MASTER SHEET SUGGESTIONS
   [2] Sonos Ray Soundbar
       - Product name word(s) 'soundbar' appear in none of the 1 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
   [5] Samsung 50” QN90F Neo QLED Mini LED 4K UHD TV
-      - Product name word(s) 'mini', 'uhd' appear in none of the 1 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
-  [4] Philips Hue Twilight Lamp Black
-      - Product name word(s) 'lamp', 'black' appear in none of the 1 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
-      - spec/keyword 'Black' is in none of the verified page titles - it can hold a page at Medium
+      - Product name word(s) 'uhd' appear in none of the 2 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
   [6] Govee COB LED Strip Lights 2 Pro 16.4ft
       - verified pages also report model code(s) H1AA2 (not in your MPN/Model cell)
-      - Product name word(s) 'led', 'lights' appear in none of the 1 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
   [11] Samsung Galaxy Tab A9 plus silver
       - Product URL reebelo.com is only Medium confidence (Product URL identity unconfirmed (weak name match))
-  [9] Costway 47x24 Treadmill May Large
-      - Product URL at wayfair.com failed (identity_mismatch) - check the link still shows this exact product
+  [12] Geometric Plant Poster living room 28x40
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [13] 28x40” Walnut stain - Poster Frame
+      - Product URL at arttoframe.com failed (identity_mismatch) - check the link still shows this exact product
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [14] Teak Mid Century Modern Wall Pocket Set of 5
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [15] 17 " H Faux Pampas Grass
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [16] Farmhouse Full Length Mirror with Stand 22x65 Inch, Wooden Frame Floor Mirror
+      - Product URL at amazon.com failed (identity_mismatch) - check the link still shows this exact product
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [17] Vertical Bonsai Moss Wall Art
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [18] kasa ks225 light switch dimmers
+      - Product name word(s) 'light' appear in none of the 1 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
+  [19] THIRDREALITY Motion Sensor
+      - MPN/Model is blank - verified pages report P1WMSA1
+      - Brand is blank - verified pages report 'ThirdReality'
+  [20] Everything Presence One
+      - GTIN/UPC is blank - verified pages report 5061109960010
+      - MPN/Model is blank - verified pages report EP1-FULL-01
+      - Brand is blank - verified pages report 'Everything Smart Technology'
+  [21] Smart LV Wall Mount for Tablets
+      - Product URL at mount.modoco.io failed (parser_failure) - check the link still shows this exact product
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [22] Heat Wall Art
+      - Product URL at sandgrainstudio.com failed (identity_mismatch) - check the link still shows this exact product
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [23] The Dark Knight Wall Art
+      - Product name word(s) 'wall', 'art' appear in none of the 12 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
+      - Product URL sandgrainstudio.com is only Medium confidence (Product URL identity unconfirmed (weak name match))
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [24] Dune Part 2 Wall Art
+      - Product name word(s) 'wall' appear in none of the 12 verified page title(s) - they can hold a page at Medium; consider dropping them from the name
+      - Product URL sandgrainstudio.com is only Medium confidence (Product URL identity unconfirmed (weak name match))
+      - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
+  [25] 12x18” Walnut stain - Poster Frame
+      - Product URL at arttoframe.com failed (identity_mismatch) - check the link still shows this exact product
       - no GTIN or MPN known yet - add either so pages are matched by identifier, not by title
 
 RETAILER SEARCH YIELD (site search / sitemap crawl)
